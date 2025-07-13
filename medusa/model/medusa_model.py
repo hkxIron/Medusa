@@ -98,8 +98,8 @@ class MedusaModelABC(nn.Module):
         super().__init__(config)
         # For compatibility with the old APIs
 
-        medusa_num_heads = config.medusa_num_heads
-        medusa_num_layers = config.medusa_num_layers
+        medusa_num_heads = config.medusa_num_heads # 有多少个Medusa heads
+        medusa_num_layers = config.medusa_num_layers # 每个Medusa head有多少层layers
         base_model_name_or_path = config._name_or_path
         self.hidden_size = config.hidden_size
         self.vocab_size = config.vocab_size
@@ -111,7 +111,7 @@ class MedusaModelABC(nn.Module):
         self.medusa_head = nn.ModuleList(
             [
                 nn.Sequential(
-                    *([ResBlock(self.hidden_size)] * medusa_num_layers),
+                    *([ResBlock(self.hidden_size)] * medusa_num_layers), # 将前面的layers拼在一起
                     nn.Linear(self.hidden_size, self.vocab_size, bias=False),
                 )
                 for _ in range(medusa_num_heads)

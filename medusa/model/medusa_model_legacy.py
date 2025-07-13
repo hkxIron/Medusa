@@ -30,6 +30,7 @@ class MedusaConfig(PretrainedConfig):
         **kwargs,
     ):
         super().__init__(**kwargs)
+        # Medusa单独的参数
         self.medusa_num_heads = medusa_num_heads
         self.medusa_num_layers = medusa_num_layers
         self.version = version
@@ -47,13 +48,13 @@ class ResBlock(nn.Module):
         hidden_size (int): The size of the hidden layers in the block.
     """
 
-    def __init__(self, hidden_size):
+    def __init__(self, hidden_size:int):
         super().__init__()
         self.linear = nn.Linear(hidden_size, hidden_size)
         # Initialize as an identity mapping
-        torch.nn.init.zeros_(self.linear.weight)
+        torch.nn.init.zeros_(self.linear.weight) # 注意：权重初始化为0
         # Use SiLU activation to keep consistent with the Llama model
-        self.act = nn.SiLU()
+        self.act = nn.SiLU() # 如果是其它的模型，可能需要换成其它的激活函数
 
     def forward(self, x):
         """
@@ -94,14 +95,15 @@ class MedusaModel(nn.Module):
         self.config = base_model.config
         self.hidden_size = base_model.config.hidden_size
         self.vocab_size = base_model.config.vocab_size
-        self.medusa = medusa_num_heads
-        self.medusa_num_layers = medusa_num_layers
+        self.medusa = medusa_num_heads # 有多个medusa head
+        self.medusa_num_layers = medusa_num_layers # 每个medusa head有多个layers
         self.base_model_name_or_path = base_model_name_or_path
         self.tokenizer = AutoTokenizer.from_pretrained(self.base_model_name_or_path)
         # Create a list of Medusa heads
         self.medusa_head = nn.ModuleList(
             [
                 nn.Sequential(
+                    # 有多个medusa头，每个medusa头有多个ResBlock layer
                     *([ResBlock(self.hidden_size)] * medusa_num_layers),
                 )
                 for _ in range(medusa_num_heads)
@@ -109,7 +111,7 @@ class MedusaModel(nn.Module):
         )
 
         # Ensure medusa_head's dtype and device align with the base_model
-        self.medusa_head.to(self.base_model.dtype).to(self.base_model.device)
+        self.medusa_head.to(dtype=self.base_model.dtype).to(device=self.base_model.device)
 
     def get_tokenizer(self):
         """Get the tokenizer of the base model.
@@ -122,7 +124,7 @@ class MedusaModel(nn.Module):
     @classmethod
     def from_pretrained(
         cls,
-        medusa_head_name_or_path,
+        medusa_head_name_or_path:str,
         base_model=None,
         medusa_num_heads=None,
         **kwargs,
@@ -147,6 +149,7 @@ class MedusaModel(nn.Module):
             medusa_config.base_model_name_or_path, **kwargs
         )
 
+        # 生成medusa model
         model = cls(
             base_model,
             medusa_config.medusa_num_heads,
@@ -159,6 +162,7 @@ class MedusaModel(nn.Module):
         else:
             filename = hf_hub_download(medusa_head_name_or_path, "medusa_lm_head.pt")
         medusa_head_state_dict = torch.load(filename, map_location=base_model.device)
+        # 加载medusa model中的head参数
         model.medusa_head.load_state_dict(medusa_head_state_dict, strict=False)
 
         return model

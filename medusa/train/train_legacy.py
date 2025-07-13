@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 import json
 import math
 import pathlib
-from typing import Dict, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 import torch
@@ -41,9 +41,12 @@ from medusa.model.medusa_model_legacy import MedusaModel, MedusaConfig
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
 
+"""
+训练Medusa模型的MedusaHead
+"""
 # Customized for training Medusa heads
 class CustomizedTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model:MedusaModel, inputs:Dict[str, Any], return_outputs=False):
         """
         Compute the training loss for the model.
 
@@ -61,15 +64,16 @@ class CustomizedTrainer(Trainer):
         else:
             medusa = model.medusa
 
-        logits = model(
-            input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"]
-        )
+        # logits:[batch, seq_len, vocab_size]
+        logits = model.forward(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"])
+        # labels:[batch, seq_len]
         labels = inputs["labels"]
+
         # Shift so that tokens < n predict n
         loss = 0
         loss_fct = CrossEntropyLoss()
         log = {}
-        for i in range(medusa):
+        for i in range(medusa): # 遍历所有的Medusa头
             medusa_logits = logits[i, :, : -(2 + i)].contiguous()
             medusa_labels = labels[..., 2 + i :].contiguous()
             medusa_logits = medusa_logits.view(-1, logits.shape[-1])
@@ -81,7 +85,7 @@ class CustomizedTrainer(Trainer):
             medusa_labels = medusa_labels[not_ignore]
 
             # Add top-k accuracy
-            for k in range(1, 2):
+            for k in range(1, 2):# 这里只计算top-1的准确率
                 _, topk = medusa_logits.topk(k, dim=-1)
                 topk = topk[not_ignore]
                 correct = topk.eq(medusa_labels.unsqueeze(-1)).any(-1)

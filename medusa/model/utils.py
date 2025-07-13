@@ -349,6 +349,8 @@ def tree_decoding(
 
 def get_nucleus_posterior_mask(logits, candidates, temperature, top_p):
     """
+    核采样
+
     Generates a posterior mask for token candidates using nucleus (top-p) sampling.
 
     This function applies nucleus sampling to a set of logits, and then generates a mask indicating 
