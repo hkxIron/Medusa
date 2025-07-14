@@ -193,12 +193,41 @@ def preprocess(
     prompts = []
     # # import pdb; pdb.set_trace()
     for i, conversation in enumerate(sources):
-        prompt = tokenizer.apply_chat_template(conversation, tokenize=False)
+        #print(conversation)
+        """
+        {
+            "id": "QWJhYvA_0",
+            "conversations": [
+            {
+                "from": "human",
+                "value": "Summarize the main ideas of Jeff Walker's Product Launch Formula into bullet points as it pertains to a growth marketing agency implementing these strategies and tactics for their clients..."
+            },
+            {
+                "from": "gpt",
+                "value": "Here are the main ideas of Jeff Walker's Product Launch Formula that can be applied by a growth marketing agency for their clients:\n\n1. Identify the target audience and their needs: Understand the ideal customer for the product or service, and create a messaging that resonates with them.\n2. Pre-launch: Build anticipation and excitement for the launch by creating buzz, gathering testimonials and case studies, and using social media to create awareness.\n3. Launch: Use a well-crafted launch sequence to maximize sales and conversions. This can include offering bonuses, creating scarcity, and using a deadline to create urgency.\n4. Post-launch: Follow up with customers, gather feedback, and continue to provide value to keep them engaged and loyal.\n5. Create a product suite: Once the initial product is successful, expand the offering by creating additional products or services that address other needs of the same audience.\n6. Continual optimization: Continually monitor and optimize the launch process and product suite to improve results.\n7. Build a community: Use the launch process to build a community of customers who are passionate about the product and can help spread the word.\n8. Use automation: Use technology and automation to streamline the launch process and improve efficiency."
+            }
+            ]
+        }
+        """
+        new_conservations = []
+        for sample in conversation["conversations"]:
+            # If examples is a string, convert it to proper chat format
+            if sample["from"] == "human":
+                examples = [{"role": "user", "content": sample["value"]}]
+            else:
+                examples = [{"role": "assistant", "content": sample["value"]}]
+            
+            # Or if it's a list of strings
+            # elif isinstance(examples, list) and all(isinstance(x, str) for x in examples):
+            #     examples = [{"role": "user", "content": msg} for msg in examples]
+            new_conservations.append(examples)
+
+        prompt = tokenizer.apply_chat_template(new_conservations, tokenize=False)
         prompts.append(prompt)
         conversations.append(conversation)
 
     # Tokenize conversations
-    encoding = tokenizer(
+    encoding: transformers.BatchEncoding = tokenizer(
         prompts,
         return_tensors="pt",
         padding="max_length",
@@ -206,24 +235,33 @@ def preprocess(
         return_offsets_mapping=True,
     )
     # Set everything to be ignored, except the assistant part
-    targets = torch.full_like(encoding.input_ids, IGNORE_TOKEN_ID)
+    #targets = torch.full_like(encoding.input_ids, IGNORE_TOKEN_ID)
+    targets = encoding.input_ids
     input_ids = encoding.input_ids
 
-    # Mask targets. Only compute loss on the assistant outputs.
+    # Mask targets. Only compute loss on the assistant outputs. 只在assistant部分计算loss
+    # targets: [batch, seq_len], input_ids: [batch, seq_len]
     for conv_index, (conversation, target, prompt) in enumerate(zip(conversations, targets, prompts)):
+        #print(f"{conv_index=} {conversation=} {target=} {prompt=}")
+        # for turn in conversation:
+        #     print(f"turn:{turn}")
+        #     content = turn
+        #     # print(turn)
+        #     # if turn.get("role", "") == "assistant":
+        #     #     content = turn["content"]
+        #     # else:
+        #     #     continue
 
-        for turn in conversation:
-            if turn["role"] == "assistant":
-                content = turn["content"]
-                # Unfortunate strip() necessary because chat templates are doing the same.
-                start = prompt.index(content.strip())
-                stop = start + len(content)
-                indices= []
-                for tok_index, (tok_start, tok_stop) in enumerate(encoding.offset_mapping[conv_index]):
-                    if tok_stop >= start or tok_start < tok_stop:
-                        indices.append(tok_index)
-                target[indices] = encoding.input_ids[conv_index][indices]
-
+        # Unfortunate strip() necessary because chat templates are doing the same.
+        # content = "\n".join(prompt)
+        # start = prompt.index(content.strip())
+        # stop = start + len(content)
+        # indices= []
+        # for tok_index, (tok_start, tok_stop) in enumerate(encoding.offset_mapping[conv_index]):
+        #     if tok_stop >= start or tok_start < tok_stop:
+        #         indices.append(tok_index)
+        # target[indices] = encoding.input_ids[conv_index][indices]
+        pass
 
     return dict(
         input_ids=input_ids,

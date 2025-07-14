@@ -199,9 +199,10 @@ class MedusaModelABC(nn.Module):
                 position_ids=position_ids,
                 **kwargs,
             )
+
         with torch.inference_mode():
             # Pass input through the base model
-            outputs = self.base_model.model(
+            outputs = self.base_model.model.forward(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
@@ -219,6 +220,7 @@ class MedusaModelABC(nn.Module):
         if output_orig:
             return torch.stack(medusa_logits, dim=0), outputs, orig
         return torch.stack(medusa_logits, dim=0)
+
     def get_medusa_choice(self, model_name):
         if 'vicuna' in model_name:
             if '7b' in model_name:
