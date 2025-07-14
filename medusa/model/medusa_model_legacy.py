@@ -79,7 +79,7 @@ class MedusaModel(nn.Module):
 
     def __init__(
         self,
-        base_model,
+        base_model:PreTrainedModel,
         medusa_num_heads=4,
         medusa_num_layers=1,
         base_model_name_or_path="lmsys/vicuna-7b-v1.3",
@@ -91,8 +91,8 @@ class MedusaModel(nn.Module):
             medusa_num_layers (int, optional): Number of ResBlock layers for each Medusa head. Defaults to 0.
         """
         super().__init__()
-        self.base_model = base_model
-        self.config = base_model.config
+        self.base_model: PreTrainedModel = base_model
+        self.config: PretrainedConfig = base_model.config
         self.hidden_size = base_model.config.hidden_size
         self.vocab_size = base_model.config.vocab_size
         self.medusa = medusa_num_heads # 有多个medusa head
@@ -103,7 +103,7 @@ class MedusaModel(nn.Module):
         self.medusa_head = nn.ModuleList(
             [
                 nn.Sequential(
-                    # 有多个medusa头，每个medusa头有多个ResBlock layer
+                    # 有多个medusa头，每个medusa头有多个ResBlock layer, 直接将medusa_num_layers个ResBlock layer拼接在一个list中
                     *([ResBlock(self.hidden_size)] * medusa_num_layers),
                 )
                 for _ in range(medusa_num_heads)
@@ -137,7 +137,7 @@ class MedusaModel(nn.Module):
         Returns:
             MedusaModel: A MedusaModel instance loaded from the given path.
         """
-        medusa_config = MedusaConfig.from_pretrained(medusa_head_name_or_path)
+        medusa_config: PretrainedConfig = MedusaConfig.from_pretrained(medusa_head_name_or_path)
         if medusa_num_heads is not None:
             print("Overriding medusa_num_heads as:", medusa_num_heads)
             medusa_config.medusa_num_heads = medusa_num_heads
@@ -145,11 +145,9 @@ class MedusaModel(nn.Module):
             print("Overriding base_model as:", base_model)
             medusa_config.base_model_name_or_path = base_model
             
-        base_model = KVLlamaForCausalLM.from_pretrained(
-            medusa_config.base_model_name_or_path, **kwargs
-        )
+        base_model: KVLlamaForCausalLM = KVLlamaForCausalLM.from_pretrained(medusa_config.base_model_name_or_path, **kwargs)
 
-        # 生成medusa model
+        # 生成medusa model, eg: MedusaModel(base_model, medusa_num_heads, medusa_num_layers, base_model_name_or_path)
         model = cls(
             base_model,
             medusa_config.medusa_num_heads,
@@ -178,12 +176,14 @@ class MedusaModel(nn.Module):
     ):
         """Forward pass of the MedusaModel.
 
+        MedusaModel的前向只是加了多个medusa head的预测，没有做其它的任何的修改
+
         Args:
             input_ids (torch.Tensor, optional): Input token IDs.
             attention_mask (torch.Tensor, optional): Attention mask.
             labels (torch.Tensor, optional): Ground truth labels for loss computation.
             past_key_values (tuple, optional): Tuple containing past key and value states for attention.
-            output_orig (bool, optional): Whether to also output predictions from the original LM head.
+            output_orig (bool, optional): Whether to also output predictions from the original LM head. 是否输出原始模型的预测
             position_ids (torch.Tensor, optional): Position IDs.
 
         Returns:
@@ -192,25 +192,35 @@ class MedusaModel(nn.Module):
         """
         with torch.no_grad():
             # Pass input through the base model
-            outputs = self.base_model.model(
+            outputs = self.base_model.model.forward(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
                 position_ids=position_ids,
             )
             if output_orig:
-                orig = self.base_model.lm_head(outputs[0])
+                # orig_seq_logits: [batch_size, seq_len, hidden_size]
+                orig_seq_logits = self.base_model.lm_head.forward(outputs[0])
+
         # Clone the output hidden states
+        # hidden_states: [batch_size, seq_len, hidden_size]
         hidden_states = outputs[0].clone()
         medusa_logits = []
         # TODO: Consider parallelizing this loop for efficiency?
         for i in range(self.medusa):
+            # mhidden_states: [batch_size, seq_len, hidden_size]
             mhidden_states = self.medusa_head[i](hidden_states)
+            # mlogits: [batch_size, seq_len, vocab_size]
             mlogits = self.base_model.lm_head(mhidden_states)
+            # medusa_logits: list of [batch_size, seq_len, vocab_size], 不同的medusa head的seq logits预测结果
             medusa_logits.append(mlogits)
+
+        # all_medusa_logits: [medusa_num_heads, batch_size, seq_len, vocab_size]
+        all_medusa_logits = torch.stack(medusa_logits, dim=0) 
         if output_orig:
-            return torch.stack(medusa_logits, dim=0), outputs, orig
-        return torch.stack(medusa_logits, dim=0)
+            return all_medusa_logits, outputs, orig_seq_logits
+
+        return all_medusa_logits
 
     def medusa_generate(
         self,

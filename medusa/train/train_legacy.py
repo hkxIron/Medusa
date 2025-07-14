@@ -64,7 +64,7 @@ class CustomizedTrainer(Trainer):
         else:
             medusa = model.medusa
 
-        # logits:[batch, seq_len, vocab_size]
+        # logits:[medusa_head, batch, seq_len, vocab_size]
         logits = model.forward(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"])
         # labels:[batch, seq_len]
         labels = inputs["labels"]
@@ -74,26 +74,35 @@ class CustomizedTrainer(Trainer):
         loss_fct = CrossEntropyLoss()
         log = {}
         for i in range(medusa): # 遍历所有的Medusa头
-            medusa_logits = logits[i, :, : -(2 + i)].contiguous()
+            """
+            原始的llama模型的loss计算 
+            # logits:[batch_size, seq_len, vocab_size], 取0～seq_len-1的token logits
+            # labels:[batch_size, seq_len], 对应label为1～seq_len
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            """
+            medusa_logits = logits[i, :, : -(2 + i)].contiguous() # 取出第i个Medusa头的logits, 预测的是next next token, 即向左移2位
             medusa_labels = labels[..., 2 + i :].contiguous()
-            medusa_logits = medusa_logits.view(-1, logits.shape[-1])
-            medusa_labels = medusa_labels.view(-1)
+            medusa_logits = medusa_logits.view(-1, logits.shape[-1]) # [batch_size * (seq_len - 2), vocab_size]
+            medusa_labels = medusa_labels.view(-1) # [batch_size * (seq_len - 2)]
             medusa_labels = medusa_labels.to(medusa_logits.device)
             loss_i = loss_fct(medusa_logits, medusa_labels)
             loss += loss_i
             not_ignore = medusa_labels.ne(IGNORE_TOKEN_ID)
-            medusa_labels = medusa_labels[not_ignore]
+            medusa_labels = medusa_labels[not_ignore] # [batch_size * (seq_len - 2)], 只取label不为IGNORE_TOKEN_ID的token, shape可能会变小
 
             # Add top-k accuracy
             for k in range(1, 2):# 这里只计算top-1的准确率
+                # medusa_logits: [batch_size * (seq_len - 2), vocab_size], vocab_size维取topK
                 _, topk = medusa_logits.topk(k, dim=-1)
                 topk = topk[not_ignore]
                 correct = topk.eq(medusa_labels.unsqueeze(-1)).any(-1)
                 log[f"medusa{i}_top{k}"] = correct.float().mean().item()
 
-            log[f"medusa{i}_loss"] = loss_i.item()
+            log[f"medusa{i}_loss"] = loss_i.item() # item()将tensor转换为python标量
         self.log(log)
-        return (loss, logits) if return_outputs else loss
+
+        return (loss, logits) if return_outputs else loss # hf Trainer框架要求返回标量
 
 
 @dataclass
@@ -361,7 +370,7 @@ def train():
         torch_dtype=torch.bfloat16,
     )
 
-    # Freeze the base model
+    # Freeze the base model, 基础模型参数不参与训练, 只训练Medusa头
     for param in model.base_model.parameters():
         param.requires_grad = False
 
