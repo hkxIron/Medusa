@@ -1,0 +1,91 @@
+{
+    // pip install torch==2.5.1
+    // "--model_name_or_path", "/home/hkx/data/work/hf_data_and_model/models/MoZhang96/TinyStories-LLaMA2-20M-256h-4l-GQA/",
+    // "--model_name_or_path", "/home/hkx/data/work/hf_data_and_model/models/Qwen/Qwen2.5-0.5B-Instruct",
+    // 注意：调试时，需要将待调试的python文件选为当前的文件
+    // 快捷键:
+    // F5进行调试
+    // Shift + F5可以停止调试
+    // Ctrl + F5:不调试，直接运行
+    "version": "0.2.0",
+    "configurations": [
+          {
+            "name": "Medusa调试",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "medusa/train/train_legacy.py",
+            "args": [
+                "--model_name_or_path", "tangledlabs/tangled-llama-pints-1.5b-v0.2-instruct",
+                "--data_path", "/home/hkx/data/work/hf_data_and_model/datas/ShareGPT_Vicuna_unfiltered/ShareGPT_V4.3_min.json",
+                "--bf16",
+                "--output_dir", "test",
+                "--num_train_epochs", "1",
+                "--per_device_train_batch_size", "1",
+                "--per_device_eval_batch_size", "1",
+                "--gradient_accumulation_steps", "4",
+                "--eval_strategy", "no",
+                "--save_strategy", "no",
+                "--learning_rate", "1e-3",
+                "--weight_decay", "0.0",
+                "--warmup_ratio", "0.1",
+                "--lr_scheduler_type", "cosine",
+                "--logging_steps", "1",
+                "--model_max_length", "2048",
+                "--lazy_preprocess",
+                "--medusa_num_heads", "2",
+                "--medusa_num_layers", "1"
+            ],
+            "cwd": "${fileDirname}",  // 使用当前文件所在目录作为工作目录
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}", // 添加当前工程目录
+                "CUDA_VISIBLE_DEVICES": "0",  // Set to your GPU ID
+                "MASTER_ADDR": "localhost",
+                "MASTER_PORT": "29500",
+                "WORLD_SIZE": "1",
+                "RANK": "0",
+                "LOCAL_RANK": "0"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "调试test_generate.py",
+            "type": "debugpy",
+            "request": "launch",
+            "justMyCode": false,
+            "program": "${file}", 
+            "console": "integratedTerminal",
+            "args": [ 
+                "--model_dir", "/home/hkx/data/work/hf_data_and_model/models/MoZhang96/TinyStories-LLaMA2-20M-256h-4l-GQA/",
+                "--output_dir", "output/AdvertiseGenSFT/test_sft_model_out/",
+                "--log_dir", "output/AdvertiseGenSFT/test_pred_model_log/",
+                "--test_file", "data/test_csv/dev_min1.csv,data/test_csv/dev_min2.csv",
+                "--batch_size", "2",
+                "--max_length", "50",
+                "--learning_rate", "5e-5",
+                "--num_train_epochs", "1",
+                "--log_steps", "10",
+                "--tracking", "True",
+                "--clip_model_for_debug", "True",
+                "--use_my_batch_padding_collator", "True",
+            ],
+            "cwd": "${fileDirname}",  // 使用当前文件所在目录作为工作目录
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"  // 添加当前工程目录
+            }
+        },
+        {
+            "name": "调试当前py文件",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}", 
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [ ],
+            "cwd": "${fileDirname}",  // 使用当前文件所在目录作为工作目录
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"  // 添加当前工程目录
+            }
+        },
+    ]
+}
