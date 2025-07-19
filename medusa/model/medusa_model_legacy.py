@@ -10,6 +10,13 @@ import os
 from huggingface_hub import hf_hub_download
 
 
+"""
+注意：
+本文件代码废弃不用
+
+medusa_model.py：每个medusa head都加了一个自己的lm head
+medusa_model_legacy.py：每个medusa head都没有自己的lm head,大家都复用base model的lm head, 因此被称为legacy，意为“遗留不用的”
+"""
 class MedusaConfig(PretrainedConfig):
     """
     Configuration class for Medusa model.
@@ -106,6 +113,7 @@ class MedusaModel(nn.Module):
                     # 有多个medusa头，每个medusa头有多个ResBlock layer, 直接将medusa_num_layers个ResBlock layer拼接在一个list中
                     *([ResBlock(self.hidden_size)] * medusa_num_layers),
                 )
+                # 注意：这里的medusa head后面并没有linear layer, 需要复用原始模型的lm head
                 for _ in range(medusa_num_heads)
             ]
         )
@@ -154,13 +162,13 @@ class MedusaModel(nn.Module):
             medusa_config.medusa_num_layers,
             medusa_config.base_model_name_or_path,
         )
-        medusa_head_path = os.path.join(medusa_head_name_or_path, "medusa_lm_head.pt")
+        medusa_head_path = os.path.join(medusa_head_name_or_path, "medusa_lm_head.safetensors")
         if os.path.exists(medusa_head_path):
             filename = medusa_head_path
         else:
-            filename = hf_hub_download(medusa_head_name_or_path, "medusa_lm_head.pt")
+            filename = hf_hub_download(medusa_head_name_or_path, "medusa_lm_head.safetensors")
         medusa_head_state_dict = torch.load(filename, map_location=base_model.device)
-        # 加载medusa model中的head参数
+        # 加载medusa model中的head参数到模型变量中
         model.medusa_head.load_state_dict(medusa_head_state_dict, strict=False)
 
         return model
@@ -199,7 +207,7 @@ class MedusaModel(nn.Module):
                 position_ids=position_ids,
             )
             if output_orig:
-                # orig_seq_logits: [batch_size, seq_len, hidden_size]
+                # orig_seq_logits: gg[batch_size, seq_len, hidden_size]
                 orig_seq_logits = self.base_model.lm_head.forward(outputs[0])
 
         # Clone the output hidden states
@@ -207,11 +215,11 @@ class MedusaModel(nn.Module):
         hidden_states = outputs[0].clone()
         medusa_logits = []
         # TODO: Consider parallelizing this loop for efficiency?
-        for i in range(self.medusa):
+        for i in range(self.medusa): # 对每个medusa head进行预测
             # mhidden_states: [batch_size, seq_len, hidden_size]
             mhidden_states = self.medusa_head[i](hidden_states)
             # mlogits: [batch_size, seq_len, vocab_size]
-            mlogits = self.base_model.lm_head(mhidden_states)
+            mlogits = self.base_model.lm_head(mhidden_states) # 这里的medusa直接利用原始模型的lm head
             # medusa_logits: list of [batch_size, seq_len, vocab_size], 不同的medusa head的seq logits预测结果
             medusa_logits.append(mlogits)
 
@@ -246,7 +254,7 @@ class MedusaModel(nn.Module):
         Returns:
             torch.Tensor: Output token IDs.
 
-        Warning: Only support batch size 1 for now!!
+        Warning: Only support batch size 1 for now!! # 只支持batch size=1
         """
         assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
         # Avoid modifying the input_ids in-place
@@ -258,9 +266,7 @@ class MedusaModel(nn.Module):
             medusa_buffers = self.medusa_buffers
         else:
             # Initialize the medusa buffer
-            medusa_buffers = generate_medusa_buffers(
-                medusa_choices, device=self.base_model.device
-            )
+            medusa_buffers = generate_medusa_buffers(medusa_choices, device=self.base_model.device)
         self.medusa_buffers = medusa_buffers
         self.medusa_choices = medusa_choices
 
@@ -286,6 +292,7 @@ class MedusaModel(nn.Module):
 
         reset_medusa_mode(self)
         # Initialize tree attention mask and process prefill tokens
+        # 1. 生成原始模型推理的logits，以及medusa的logits
         medusa_logits, logits = initialize_medusa(
             input_ids, self, medusa_buffers["medusa_attn_mask"], past_key_values
         )
@@ -294,6 +301,7 @@ class MedusaModel(nn.Module):
         last_round_token = 0
 
         for idx in range(max_steps):
+            # 2. 生成各medusa头的候选集
             # Generate candidates with topk predictions from Medusa heads
             candidates, tree_candidates = generate_candidates(
                 medusa_logits,
@@ -302,6 +310,7 @@ class MedusaModel(nn.Module):
                 medusa_buffers["retrieve_indices"],
             )
 
+            # 3. 使用模型再推理一次，使用tree attention验证候选集
             # Use tree attention to verify the candidates and get predictions
             medusa_logits, logits, outputs = tree_decoding(
                 self,
@@ -312,6 +321,7 @@ class MedusaModel(nn.Module):
                 medusa_buffers["retrieve_indices"],
             )
 
+            # 4. 评估候选集的后验概率，选择接受的候选前缀
             # Evaluate the posterior of the candidates to select the accepted candidate prefix
             best_candidate, accept_length = evaluate_posterior(
                 logits, candidates, temperature, posterior_threshold, posterior_alpha

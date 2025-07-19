@@ -338,7 +338,7 @@ if __name__ == "__main__":
 
         np.random.seed(0)
         np.random.shuffle(matches)
-
+        # 利用线程池并行请求
         with ThreadPoolExecutor(args.parallel) as executor:
             for match in tqdm(
                 executor.map(play_a_match_wrapper, matches), total=len(matches)

@@ -282,7 +282,7 @@ def generate_candidates(medusa_logits, logits, tree_indices, retrieve_indices, t
     else:
         if sampling == 'typical':
             candidates_logit = get_typical_one_token(logits[:, -1], temperature, posterior_threshold, posterior_alpha).squeeze(0)
-        elif sampling == 'nucleus':
+        elif sampling == 'nucleus': # 核采样
             candidates_logit = get_nucleus_one_token(logits[:, -1], temperature, top_p).squeeze(0)
         else:
             raise NotImplementedError
@@ -334,7 +334,7 @@ def tree_decoding(
 
     # Use the model to decode the tree candidates. 
     # The model is expected to return logits for the Medusa structure, original logits, and possibly other outputs.
-    tree_medusa_logits, outputs, tree_logits = model(
+    tree_medusa_logits, outputs, tree_logits = model.forward(
         tree_candidates,
         output_orig=True,
         past_key_values=past_key_values,

@@ -11,8 +11,9 @@ tokenizer = None
 conv = None
 
 
-def load_model_function(model_name, load_in_8bit=False, load_in_4bit=False):
-    model_name = model_name or "FasterDecoding/medusa-vicuna-7b-v1.3"
+def load_model_function(model_name:str, load_in_8bit=False, load_in_4bit=False):
+    #model_name = model_name or "FasterDecoding/medusa-vicuna-7b-v1.3"
+    model_name = model_name or "/home/hkx/data/work/open/Medusa/llama_medusa_output_medusa_mlp_TinyStories-LLaMA2-20M-256h-4l-GQA_medusa_2_lr_0.001_layers_1"
     global model, tokenizer, conv
 
     try:
@@ -108,4 +109,5 @@ if __name__ == "__main__":
                                             ["Load Model", "Chat"])
 
     # Launch the combined interface
-    combined_interface.queue().launch()
+    #combined_interface.queue().launch(share=True)
+    combined_interface.queue().launch(share=False)

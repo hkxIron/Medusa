@@ -23,7 +23,6 @@ import json
 import math
 import pathlib
 from typing import Any, Dict, List, Optional, Sequence
-import deepspeed
 
 import numpy as np
 import torch
@@ -39,9 +38,36 @@ from safetensors.torch import save_file
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 import os
-from medusa.model.medusa_model_legacy import MedusaModel, MedusaConfig
+from medusa.model.medusa_model import MedusaModel, MedusaConfig, MedusaModel
+from transformers import (AutoModelForCausalLM, AutoConfig, AutoTokenizer, Trainer, TrainingArguments, BitsAndBytesConfig, BatchEncoding, PreTrainedTokenizer)
+
+from medusa.model.modeling_llama_kv import LlamaForCausalLM
+
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
+
+def show_id_token_mask(tokenizer:PreTrainedTokenizer, 
+                       input_id:List[int]|torch.Tensor, 
+                       attention_mask:List[int]|torch.Tensor, 
+                       labels:List[int]|torch.Tensor=None,
+                       name=""):
+    if isinstance(input_id, torch.Tensor):
+        input_id = input_id.tolist()
+    if isinstance(attention_mask, torch.Tensor):
+        attention_mask = attention_mask.tolist()
+
+    tokens = [f"{tokenizer.convert_ids_to_tokens(i)}" if i>=0 else str(i) for i in input_id]
+    df = pd.DataFrame({
+        "input_ids":input_id,
+        "token":tokens,
+        "attention_mask":attention_mask,
+    })
+    if labels is not None:
+        if isinstance(labels, torch.Tensor):
+            labels = labels.tolist()
+        df["labels"]=pd.Series(labels)
+    print(f"name:{name}\n{df.to_string()}")
+    #print(tabulate(df, headers='keys', tablefmt='grid'))
 
 """
 
@@ -122,6 +148,13 @@ def show_diff_ids(ids_left:List[int], ids_right:List[int], tokenizer, ids_left_n
 """
 # Customized for training Medusa heads
 class CustomizedTrainer(Trainer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        #self.steps = 0
+    
+    def get_original_model(self, model):
+        return model.module if hasattr(model, "module") else model
+
     """计算loss
     """
     def compute_loss(self, model:MedusaModel, inputs:Dict[str, Any], return_outputs=False, **kwargs):
@@ -137,28 +170,32 @@ class CustomizedTrainer(Trainer):
             Union[float, Tuple[float, torch.Tensor]]: The computed loss, optionally with model outputs.
         """
         # DDP will give us model.module
-        if hasattr(model, "module"):
-            medusa = model.module.medusa
-        else:
-            medusa = model.medusa
+        if hasattr(model, "module"): # DDP
+            medusa_heads = model.module.medusa_head
+        else: # 单卡
+            medusa_heads = model.medusa_head
+        #medusa = model.medusa_head
+
 
         # logits:[medusa_head, batch, seq_len, vocab_size]
-        logits = model.forward(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"])
+        logits = model.forward(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], medusa_forward=True)
         # labels:[batch, seq_len]
+        #print(f"{inputs.keys()=}, {inputs}")
         labels = inputs["labels"]
 
         # Shift so that tokens < n predict n
         loss = 0
         loss_fct = CrossEntropyLoss()
         log = {}
-        for i in range(medusa): # 遍历所有的Medusa头
+        for i in range(len(medusa_heads)): # 遍历所有的Medusa头
             """
             原始的llama模型的loss计算 
-            # logits:[batch_size, seq_len, vocab_size], 取0～seq_len-1的token logits
-            # labels:[batch_size, seq_len], 对应label为1～seq_len
+            # logits:[head, batch_size, seq_len, vocab_size], 取0～seq_len-1的token logits
+            # labels:[head, batch_size, seq_len], 对应label为1～seq_len
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             """
+            #print(f"{logits.shape=}")
             medusa_logits = logits[i, :, : -(2 + i)].contiguous() # 取出第i个Medusa头的logits, 预测的是next next token, 即向左移2位
             medusa_labels = labels[..., 2 + i :].contiguous()
             medusa_logits = medusa_logits.view(-1, logits.shape[-1]) # [batch_size * (seq_len - 2), vocab_size]
@@ -179,6 +216,14 @@ class CustomizedTrainer(Trainer):
 
             log[f"medusa{i}_loss"] = loss_i.item() # item()将tensor转换为python标量
         self.log(log)
+
+        current_step = self.state.global_step
+        if current_step==0:
+            origin_model = self.get_original_model(model) # ddp -> unwrapped model
+            show_id_token_mask(origin_model.tokenizer, inputs["input_ids"][0], inputs["attention_mask"][0], labels=labels[0], name="原始标签")
+            show_id_token_mask(origin_model.tokenizer, inputs["input_ids"][0], inputs["attention_mask"][0], labels=medusa_labels[0], name="medusa标签")
+
+        #self.step +=1
 
         return (loss, logits) if return_outputs else loss # hf Trainer框架要求返回标量
 
@@ -237,19 +282,20 @@ def rank0_print(*args):
         print(*args)
 
 
-def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
-    """
-    Save the model's state dictionary to a specified directory.
+# def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
+#     """
+#     Save the model's state dictionary to a specified directory.
 
-    Args:
-        trainer (transformers.Trainer): The Hugging Face Trainer object.
-        output_dir (str): The directory where the model state dictionary will be saved.
-    """
-    state_dict = trainer.model.state_dict()
-    if trainer.args.should_save:
-        cpu_state_dict = {key: value.cpu() for key, value in state_dict.items()}
-        del state_dict
-        trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
+#     Args:
+#         trainer (transformers.Trainer): The Hugging Face Trainer object.
+#         output_dir (str): The directory where the model state dictionary will be saved.
+#     """
+#     state_dict = trainer.model.state_dict()
+#     if trainer.args.should_save:
+#         cpu_state_dict = {key: value.cpu() for key, value in state_dict.items()}
+#         del state_dict
+#         trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
+
 class MySFTDataset:
     """Dataset for supervised fine-tuning.
     注意，并不是hf的Dataset
@@ -272,16 +318,14 @@ class MySFTDataset:
         self.tokenizer = tokenizer
         self.model_max_length = max_seq_length
         # 构建hf dataset数据集
-        sft_dataset = datasets.Dataset.from_pandas(df).map(self.my_convert_tokens_to_ids).filter(lambda x:len(x["input_ids"])>0)
-
-        # if hint:
-        #     print(f"head data:{sft_dataset[0:1]=}")
-        #     print(f"valid data size:{len(sft_dataset)}")
+        sft_dataset = datasets.Dataset.from_pandas(df)\
+            .map(self.my_convert_tokens_to_ids)\
+            .filter(lambda x:len(x["input_ids"])>0 and len(x["labels"])>0)
 
         self.dataset = sft_dataset.map(remove_columns=["prompt", "input", "output", "in_text", "out_text"])
-        # if hint:
-        #     print(f"head data:{self.dataset[0:2]=}")
-        #     print(f"dataset:{data_path} build done!")
+        if hint:
+            print(f"head data:{self.dataset[0:2]=}")
+            print(f"dataset:{data_path} build done!")
     
     def my_convert_tokens_to_ids(self, example:Dict[str, str], add_enter_before_output:bool=True):
         #input_ids = [self.tokenizer.bos_token_id]
@@ -378,11 +422,11 @@ def my_batch_padding_collator(examples: List[Dict[str, Any]], tokenizer, padding
                 padded_value = to_pad_ids + value
             else:
                 padded_value = value + to_pad_ids
-            update_value = padded_output.setdefault(key, [])
-            update_value.append(padded_value)
-            #padded_output[key] = update_value
+            padded_output.setdefault(key, []).append(padded_value)
+
     # 转为tensor_ids
     padded_tensor = {k:torch.LongTensor(v) for k,v in padded_output.items()} # 均为torch.int64
+    #print(f"{padded_tensor=}")
     return padded_tensor     
 
 
@@ -397,15 +441,12 @@ def train():
     local_rank = training_args.local_rank
 
     # Set RoPE scaling factor
-    config = transformers.AutoConfig.from_pretrained(
-        model_args.model_name_or_path,
-        cache_dir=training_args.cache_dir,
-    )
-    origin_context_length = getattr(config, "max_position_embeddings", None)
-    if origin_context_length and training_args.model_max_length > origin_context_length:
-        scaling_factor = float(math.ceil(training_args.model_max_length / origin_context_length))
-        config.rope_scaling = {"type": "linear", "factor": scaling_factor}
-    config.use_cache = False # 不使用KV缓存
+    # config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path, cache_dir=training_args.cache_dir,)
+    # origin_context_length = getattr(config, "max_position_embeddings", None)
+    # if origin_context_length and training_args.model_max_length > origin_context_length:
+    #     scaling_factor = float(math.ceil(training_args.model_max_length / origin_context_length))
+    #     config.rope_scaling = {"type": "linear", "factor": scaling_factor}
+    # config.use_cache = False # 不使用KV缓存
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         model_args.model_name_or_path,
@@ -423,24 +464,19 @@ def train():
     #print(tokenizer.apply_chat_template([{"role": "user", "content": "This is a test"}]))
 
     # Load model and tokenizer
-    model = transformers.AutoModelForCausalLM.from_pretrained(
-        model_args.model_name_or_path,
-        config=config,
-        cache_dir=training_args.cache_dir,
-        torch_dtype=torch.bfloat16,
-    )
-
-    # Freeze the base model, 基础模型参数不参与训练, 只训练Medusa头
-    for param in model.base_model.parameters():
-        param.requires_grad = False
-
-    # Add Medusa heads
-    medusa_lm_head = MedusaModel(
-        model,
-        medusa_num_heads=training_args.medusa_num_heads,
-        medusa_num_layers=training_args.medusa_num_layers,
-        base_model_name_or_path=model_args.model_name_or_path,
-    )
+    #config.medusa_num_heads=training_args.medusa_num_heads
+    #config.medusa_num_layers=training_args.medusa_num_layers
+    # medusa_model:MedusaModel = MedusaModel.from_pretrained(
+    #     pretrained_model_name_or_path=model_args.model_name_or_path,
+    #     medusa_num_heads=training_args.medusa_num_heads,
+    #     medusa_num_layers=training_args.medusa_num_layers,
+    #     cache_dir=training_args.cache_dir,
+    #     torch_dtype=torch.bfloat16,
+    # )
+    base_model = LlamaForCausalLM.from_pretrained(pretrained_model_name_or_path=model_args.model_name_or_path,)
+    medusa_config = MedusaConfig(medusa_num_heads=2, medusa_num_layers=1, base_model_name_or_path=model_args.model_name_or_path,)
+    medusa_model = MedusaModel(base_model=base_model, config=medusa_config)
+    print(f"inited model:{medusa_model=}")
 
     # Format output dir
     training_args.output_dir = f"{training_args.output_dir}_medusa_mlp_{model_args.model_name_or_path.split('/')[-1]}_medusa_{training_args.medusa_num_heads}_lr_{training_args.learning_rate}_layers_{training_args.medusa_num_layers}"
@@ -451,53 +487,68 @@ def train():
         max_seq_length=training_args.model_max_length,
         hint=True
     )
-    eval_dataset = MySFTDataset(
-        data_path=data_args.eval_data_path,
-        tokenizer=tokenizer,
-        max_seq_length=training_args.model_max_length,
-        hint=False
-    )
 
+    eval_dataset = None
+    if data_args.eval_data_path:
+        eval_dataset = MySFTDataset(
+            data_path=data_args.eval_data_path,
+            tokenizer=tokenizer,
+            max_seq_length=training_args.model_max_length,
+            hint=False
+        )
+
+    # 在创建train_dataset后添加
+    print("验证训练数据...")
+    for i in range(min(5, len(train_dataset))):
+        sample = train_dataset[i]
+        assert "input_ids" in sample
+        assert "labels" in sample
+        assert "attention_mask" in sample
+        assert len(sample["input_ids"]) > 0
+        assert len(sample["labels"]) > 0
+    print("数据验证通过")
 
     # Generate Medusa config for pushing to HF hub
-    medusa_config = MedusaConfig(
-        medusa_num_heads=training_args.medusa_num_heads,
-        medusa_num_layers=training_args.medusa_num_layers,
-        base_model_name_or_path=model_args.model_name_or_path,
-        version="2"
-    )
+    # medusa_config = MedusaConfig(
+    #     medusa_num_heads=training_args.medusa_num_heads,
+    #     medusa_num_layers=training_args.medusa_num_layers,
+    #     base_model_name_or_path=model_args.model_name_or_path,
+    #     version="2"
+    # )
 
-    # Save Medusa config
-    medusa_config.save_pretrained(training_args.output_dir)
+    # # Save Medusa config
+    # medusa_config.save_pretrained(training_args.output_dir)
 
     # Start trainner
+    training_args.remove_unused_columns = False # 要设置为false,否则transformers会将labels列删除导致报错
     trainer = CustomizedTrainer(
-        model=medusa_lm_head, 
+        model=medusa_model, 
         tokenizer=tokenizer, 
         args=training_args, 
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=lambda x: my_batch_padding_collator(x, tokenizer, max_seq_len=training_args.model_max_length), 
-        remove_unused_columns=False # 要设置为false,否则transformers会将labels列删除导致报错
     )
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)
     else:
         trainer.train()
-    model.config.use_cache = True
+
+    #medusa_model.config.use_cache = True
     # trainer.save_state()
     # safe_save_model_for_hf_trainer(trainer=trainer, output_dir=training_args.output_dir)
     # Save MedusaHead seperately
-    if hasattr(medusa_lm_head, "module"):
-        lm_head = medusa_lm_head.module.medusa_head
+    if hasattr(medusa_model, "module"):
+        lm_head = medusa_model.module.medusa_head
     else:
-        lm_head = medusa_lm_head.medusa_head
+        lm_head = medusa_model.medusa_head
 
-    with deepspeed.zero.GatheredParameters(lm_head.parameters()):
-         state_dict = lm_head.state_dict()
-
-    #state_dict = trainer.accelerator.get_state_dict(trainer.model)
+    # import deepspeed
+    # with deepspeed.zero.GatheredParameters(lm_head.parameters()):
+    #     state_dict = lm_head.state_dict()
+    
+    state_dict = trainer.accelerator.get_state_dict(lm_head)
 
     # Save Medusa heads
     if local_rank == 0:
@@ -508,6 +559,7 @@ def train():
             state_dict,
             os.path.join(training_args.output_dir, "medusa_lm_head.safetensors"),
         )
+
         print(f"save medusa head done, path:{training_args.output_dir}")
 
 

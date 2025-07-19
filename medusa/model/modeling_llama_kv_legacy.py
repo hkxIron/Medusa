@@ -911,7 +911,7 @@ class LlamaModel(LlamaPreTrainedModel):
                 else expanded_attn_mask + combined_attention_mask
             )
 
-        # [MODIFIED] add medusa mask
+        # [MODIFIED] add medusa mask, 这里添加了medusa mask
         if hasattr(self, "medusa_mask") and self.medusa_mask is not None:
             medusa_mask = self.medusa_mask
             medusa_len = medusa_mask.size(-1)

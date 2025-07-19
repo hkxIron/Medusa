@@ -14,7 +14,7 @@ class KVCache:
         current_length (int): Current length of the data being stored.
     """
 
-    def __init__(self, data, current_length):
+    def __init__(self, data:torch.Tensor, current_length:int):
         """
         Initialize the KVCache.
 
