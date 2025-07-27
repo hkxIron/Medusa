@@ -1,8 +1,8 @@
 # Source: https://github.com/huggingface/transformers/blob/v4.34-release/src/transformers/models/llama/modeling_llama.py
 # Modifications are denoted by the symbol: [MODIFIED]
 # There are mainly two modifications:
-# 1. Using preallocated GPU memory for KVCache
-# 2. Modifying attention mask for integration with Medusa
+# 1. Using preallocated GPU memory for KVCache, 修改了kv cache
+# 2. Modifying attention mask for integration with Medusa, 因为medusa修改了attention mask
 
 """ PyTorch LLaMA model."""
 import math

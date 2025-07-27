@@ -1,9 +1,14 @@
+from typing import List
 import torch
 import torch.nn.functional as F
+#torch.set_printoptions(precision=2, linewidth=120)
+
+
+#from medusa.model.medusa_model import MedusaModel
 
 TOPK=10 # topk for sparse tree (10 is a placeholder and it is sufficient)
 
-def pad_path(path, length, pad_value=-2):
+def pad_path(path:List[int], length:int, pad_value=-2):
     """
     Pad the given path list with a specific value up to a specified length.
     
@@ -29,7 +34,7 @@ def pad_path(path, length, pad_value=-2):
     # Append the padding values to the original path and return the new list.
     return path + [pad_value] * (length - len(path))
 
-def generate_medusa_buffers(medusa_choices, device="cuda"):
+def generate_medusa_buffers(medusa_choices:List[List[int]], device="cuda"):
     """
     Generate buffers for the Medusa structure based on the provided choices.
     
@@ -43,10 +48,54 @@ def generate_medusa_buffers(medusa_choices, device="cuda"):
 
     # Sort the medusa_choices based on their lengths and then their values
     sorted_medusa_choices = sorted(medusa_choices, key=lambda x: (len(x), x))
-    medusa_len = len(sorted_medusa_choices) + 1
+    medusa_len = len(sorted_medusa_choices) + 1 # 63+1=64
 
+    """
+    参见attention_mask.txt中的注释
+    以mc_sim_7b_63为例
+
+    sorted_medusa_choices中每行均为一个,
+    格式为:[head[0],token[i], head[1].token[j], head[2].token[k],...]
+    [ 
+
+        # 1~10 列
+        [0], # base_model.cur_token+head[0].token[0]
+        [1], # base_model.cur_token+head[0].token[1]
+        [2],
+        [3],
+        [4],
+        [5],
+        [6],
+        [7],
+        [8],
+        [9], # base_model.cur_token+head[0].token[9]
+
+        # 11~20列
+        # depth =1， 有28个
+        # 格式为:[head[0],token[i], head[1].token[j], head[2].token[k],...]
+        # 下面括号的数据,内容为：[head[0].token[0], head[1].token[0:10]]
+        [0, 0], # base_model.cur_token+head[0].token[0] + head[1].token[0]
+        [0, 1], # base_model.cur_token+head[0].token[0] + head[1].token[1]
+        ...
+    ]
+
+    ...
+    # 49 ~ 51列
+    # 下面括号的数据,内容为：[head[0].token[0], head[1].token[1], head[2].token[0:3]]
+    [0, 1, 0],
+    [0, 1, 1],
+    [0, 1, 2],
+    ...
+
+    depth_counts: [10, 28, 23, 2] 分别表示:
+    1阶attention有10个
+    2阶attention有28个
+    3阶attention有23个
+    4阶attention有2个
+    """
     # Initialize depth_counts to keep track of how many choices have a particular depth
-    depth_counts = []
+    depth_counts = [] # depth_counts: [10, 28, 23, 2]
+    
     prev_depth = 0
     for path in sorted_medusa_choices:
         depth = len(path)
@@ -56,33 +105,74 @@ def generate_medusa_buffers(medusa_choices, device="cuda"):
         prev_depth = depth
     
     # Create the attention mask for Medusa
-    medusa_attn_mask = torch.eye(medusa_len, medusa_len)
-    medusa_attn_mask[:, 0] = 1
+    medusa_attn_mask = torch.eye(medusa_len, medusa_len) # 对角矩阵，保证每个token可以attention到自己
+    medusa_attn_mask[:, 0] = 1 # 将第0列设置为1, 表示base_model.cur_token在每个tree中必须attention验证
     start = 0
-    for i in range(len(depth_counts)):
+    # 遍历每个depth_counts, 将每个depth_counts中的所有长度的choices取出来
+    for i in range(len(depth_counts)):  # depth_counts: [10, 28, 23, 2]
         for j in range(depth_counts[i]):
-            cur_medusa_choice = sorted_medusa_choices[start + j]
-            # retrieve ancestor position
+            # 遍历choice中长度为depth_counts[i]的每个choice
+            cur_medusa_choice :List[int]= sorted_medusa_choices[start + j]
+            # 若choice长度为1, 1阶attention无祖先，无需查找父节点
             if len(cur_medusa_choice) == 1:
                 continue
+            # retrieve ancestor position
+            # 若choice长度>1, 2~4阶attention查找父节点
             ancestor_idx = []
-            for c in range(len(cur_medusa_choice) - 1):
-                ancestor_idx.append(sorted_medusa_choices.index(cur_medusa_choice[:c+1]) + 1)
-            medusa_attn_mask[j + start + 1, ancestor_idx] = 1
+            """
+            cur_medusa_choice: [0, 1, 0]
+              => [head[0].token[0], head[1].token[1], head[2].token[0:3]]
+              父结点为：[0], [0, 1]
+            """
+            for c in range(len(cur_medusa_choice) - 1): 
+                # 在当前行中查找父节点
+                # list.index(): 返回cur_medusa_choice[:c+1]在sorted_medusa_choices中的索引, 即查找父节点
+                current_parent_choice_index = sorted_medusa_choices.index(cur_medusa_choice[:c+1])
+                # 注意：此处查找的是所有的父结点，而只是一个父结点
+                ancestor_idx.append(current_parent_choice_index + 1) #  +1是为了后面索引到本身
+            # j + start+1：当前行的索引,其中的+1是因为第一行为base_model.cur_token
+            medusa_attn_mask[j + start + 1, ancestor_idx] = 1 # 将所有父节点设置为1
         start += depth_counts[i]
 
+    #torch.set_printoptions(profile="default", linewidth=200, threshold=1000)
+    #print(f"{medusa_attn_mask.to(torch.int8).tolist()=}")
+
     # Generate tree indices for the Medusa structure
-    medusa_tree_indices = torch.zeros(medusa_len, dtype=torch.long)
+    """
+    这里的tree_indices，其实就是attention中最后一个head中最后一个token的索引
+
+    #第31～32列：medusa_head[1].token[0:2], attention前缀 base_model.cur_token+medusa_head[0].token[3]
+    11, 12,  # 例如：其中11为head[1].token[0]的列索引, 12为head[1].token[1]的列索引
+
+    #第33列：medusa_head[1].token[0], attention前缀 base_model.cur_token+medusa_head[0].token[4]
+    #第34列：medusa_head[1].token[0], attention前缀 base_model.cur_token+medusa_head[0].token[5]
+    #第35列：medusa_head[1].token[0], attention前缀 base_model.cur_token+medusa_head[0].token[6]
+    #第36列：medusa_head[1].token[0], attention前缀 base_model.cur_token+medusa_head[0].token[7]
+    #第37列：medusa_head[1].token[0], attention前缀 base_model.cur_token+medusa_head[0].token[8]
+    #第38列：medusa_head[1].token[0], attention前缀 base_model.cur_token+medusa_head[0].token[9]
+    11, 11, 11, 11, 11, 11,  # 例如：其中11为head[1].token[0]的列索引
+    """
+    medusa_tree_indices = torch.zeros(medusa_len, dtype=torch.long) # shape:[64]
     medusa_tree_indices[0] = 0
     start = 0
-    for i in range(len(depth_counts)):
+    for i in range(len(depth_counts)):# depth_counts: [10, 28, 23, 2]
+        # 遍历choice中长度为depth_counts[i]的每个choice
         for j in range(depth_counts[i]):
+            """
+            cur_medusa_choice: [0, 1, 0]
+              => [head[0].token[0], head[1].token[1], head[2].token[0:3]]
+            """
             cur_medusa_choice = sorted_medusa_choices[start + j]
-            medusa_tree_indices[start + j + 1] = cur_medusa_choice[-1] + TOPK * i + 1
+            # TOPK=10, 为每个head预留10个token位置
+            last_token_index_of_last_head = cur_medusa_choice[-1] # 最后一个head的最后一个token索引
+            depth_start = TOPK * i # 该层的起始位置
+            # 最后 +1是因为base_model.cur_token在每个tree中必须attention验证
+            medusa_tree_indices[start + j + 1] = last_token_index_of_last_head + depth_start + 1
         start += depth_counts[i]
 
     # Generate position IDs for the Medusa structure
-    medusa_position_ids = torch.zeros(medusa_len, dtype=torch.long)
+    # depth_counts: [10, 28, 23, 2]
+    medusa_position_ids = torch.zeros(medusa_len, dtype=torch.long) # shape:[64]
     start = 0
     for i in range(len(depth_counts)):
         medusa_position_ids[start + 1: start + depth_counts[i] + 1] = i + 1
@@ -91,20 +181,35 @@ def generate_medusa_buffers(medusa_choices, device="cuda"):
     # Generate retrieval indices for Medusa structure verification
     retrieve_indices_nest = []
     retrieve_paths = []
+    # 注意：这次是反向遍历，从最深的tree开始遍历
     for i in range(len(sorted_medusa_choices)):
-        cur_medusa_choice = sorted_medusa_choices[-i-1]
+        """
+        cur_medusa_choice: [0, 1, 0]
+            => [head[0].token[0], head[1].token[1], head[2].token[0:3]]
+            父结点为：[0], [0, 1]
+        """
+        cur_medusa_choice = sorted_medusa_choices[-i-1] # 从倒数第一个choices开始遍历
         retrieve_indice = []
         if cur_medusa_choice in retrieve_paths:
             continue
         else:
             for c in range(len(cur_medusa_choice)):
-                retrieve_indice.append(sorted_medusa_choices.index(cur_medusa_choice[:c+1]))
-                retrieve_paths.append(cur_medusa_choice[:c+1])
+                # 在所有choices中查找当前的父结点，注意：不是仅在当前层的choices中查找
+                parent_of_cur_choice: List[int] = cur_medusa_choice[:c+1]
+                current_parent_choice_index: int = sorted_medusa_choices.index(parent_of_cur_choice)
+                # 这里的indice为父结点的索引
+                retrieve_indice.append(current_parent_choice_index)
+                # 父结点的path收集到retrieve_paths中，避免重复
+                if parent_of_cur_choice not in retrieve_paths:
+                    retrieve_paths.append(parent_of_cur_choice)
         retrieve_indices_nest.append(retrieve_indice)
+
     max_length = max([len(x) for x in retrieve_indices_nest])
-    retrieve_indices = [pad_path(path, max_length) for path in retrieve_indices_nest]
+    retrieve_indices = [pad_path(path, max_length, -2) for path in retrieve_indices_nest]
     retrieve_indices = torch.tensor(retrieve_indices, dtype=torch.long)
-    retrieve_indices = retrieve_indices + 1
+    retrieve_indices = retrieve_indices + 1 # 所有indexes +1
+    # 将第0列的base_model.cur_token的index拼上
+    # retrieve_indices.shape:[42, 1+max_length=5]
     retrieve_indices = torch.cat([torch.zeros((retrieve_indices.shape[0], 1), dtype=torch.long), retrieve_indices], dim=1)
 
     # Aggregate the generated buffers into a dictionary
@@ -118,14 +223,15 @@ def generate_medusa_buffers(medusa_choices, device="cuda"):
     # Move the tensors in the dictionary to the specified device
     medusa_buffers = {
         k: v.clone().to(device)
-        if isinstance(v, torch.Tensor)
-        else torch.tensor(v,  device=device)
-        for k, v in medusa_buffers.items()
+            if isinstance(v, torch.Tensor) else torch.tensor(v,  device=device)
+                for k, v in medusa_buffers.items()
     }
     return medusa_buffers
 
 
-def initialize_medusa(input_ids, model, medusa_attn_mask, past_key_values):
+def initialize_medusa(input_ids, model, # MedusaModel
+                      medusa_attn_mask, 
+                      past_key_values):
     """
     Initializes the Medusa structure for a given model.
 
@@ -143,15 +249,16 @@ def initialize_medusa(input_ids, model, medusa_attn_mask, past_key_values):
     - medusa_logits (torch.Tensor): Logits from the Medusa heads.
     - logits (torch.Tensor): Original logits from the base model.
     """
-    medusa_logits, outputs, logits = model(
+    medusa_logits, outputs, logits = model.forward(
         input_ids, past_key_values=past_key_values, output_orig=True, medusa_forward=True
     )
+    # 注意：更改base_model的medusa_mask
     model.base_model.model.medusa_mask = medusa_attn_mask
     return medusa_logits, logits
 
 
 def reset_medusa_mode(
-    model,
+    model, #MedusaModel,
 ):
     """
     Resets the Medusa settings and the past key-values to their initial state.

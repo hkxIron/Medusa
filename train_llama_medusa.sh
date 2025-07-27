@@ -12,11 +12,12 @@ export LOCAL_RANK=0
 model_name_or_path="/home/hkx/data/work/hf_data_and_model/models/MoZhang96/TinyStories-LLaMA2-20M-256h-4l-GQA"
 
 #    --per_device_eval_batch_size 1 \
+#--data_path data/AdvertiseGenChatML/dev_min.jsonl \
 #--eval_data_path data/AdvertiseGenChatML/dev_min.jsonl \
 
 torchrun --standalone --nproc_per_node=1 medusa/train/train_medusa.py  \
     --model_name_or_path $model_name_or_path  \
-    --data_path data/AdvertiseGenChatML/dev_min.jsonl \
+    --data_path data/AdvertiseGenChatML/dev.jsonl \
     --bf16 True \
     --output_dir llama_medusa_output2 \
     --num_train_epochs 1 \

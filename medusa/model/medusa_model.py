@@ -137,6 +137,7 @@ class MedusaModel(nn.Module):
 
         self.hidden_size = base_model_config.hidden_size
         self.vocab_size = base_model_config.vocab_size
+        #self.current_length_data = torch.zeros(1, dtype=torch.int64) # 用于记录当前的token数量
 
 
         # Create a list of Medusa heads
@@ -276,7 +277,7 @@ class MedusaModel(nn.Module):
         """
         assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
         # Avoid modifying the input_ids in-place
-        input_ids = input_ids.clone()
+        input_ids = input_ids.clone() # input_ids:[batch_size, seq_len]
 
         # Cache medusa buffers (the fixed patterns for tree attention)
         if medusa_choices is None:
@@ -287,9 +288,7 @@ class MedusaModel(nn.Module):
             medusa_buffers = self.medusa_buffers
         else:
             # Initialize the medusa buffer
-            medusa_buffers = generate_medusa_buffers(
-                medusa_choices, device=self.base_model.device
-            )
+            medusa_buffers = generate_medusa_buffers(medusa_choices, device=self.base_model.device)
         self.medusa_buffers = medusa_buffers
         self.medusa_choices = medusa_choices
 
@@ -306,8 +305,13 @@ class MedusaModel(nn.Module):
                 past_key_values_data,
                 current_length_data,
             ) = initialize_past_key_values(self.base_model)
+            # past_key_values: [ [KvCache(key), KvCache(value)], [KvCache(key), KvCache(value)], ...], 有 num_hidden_layers 个 key-value kvcache对象
+            # 每个KVCache.data的shape为 [batch_size, head_num, max_seq_len, head_dim]
+            # past_key_values_data: [num_hidden_layers * 2, batch_size, head_num, max_seq_len, head_dim]
+            # current_legth_data: [num_hidden_layers * 2]
             self.past_key_values = past_key_values
             self.past_key_values_data = past_key_values_data
+            # current_legth_data: [num_hidden_layers * 2], 奇数和偶数分别对应key和value的长度, 这两个长度一般是相同的
             self.current_length_data = current_length_data
 
         input_len = input_ids.shape[1]
