@@ -24,7 +24,7 @@ from medusa.model.medusa_model import MedusaModel
 from medusa.model.kv_cache import initialize_past_key_values
 from medusa.model.medusa_choices import *
 
-def medusa_forward(input_ids, model, tokenizer, medusa_choices, temperature, posterior_threshold, posterior_alpha, max_steps = 512):
+def medusa_infer(input_ids, model, tokenizer, medusa_choices, temperature, posterior_threshold, posterior_alpha, max_steps = 512):
     assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
     # Avoid modifying the input_ids in-place
     input_ids = input_ids.clone()
@@ -60,7 +60,7 @@ def medusa_forward(input_ids, model, tokenizer, medusa_choices, temperature, pos
 
     input_len = input_ids.shape[1]
     reset_medusa_mode(model)
-    medusa_logits, logits = initialize_medusa(
+    medusa_logits, logits = medusa_infer(
             input_ids, model, medusa_buffers["medusa_attn_mask"], past_key_values
     )
     new_token = 0
@@ -222,7 +222,7 @@ def get_model_answers(
             try:
                 torch.cuda.synchronize()
                 start_time = time.time()
-                output_ids, new_token, idx = medusa_forward(
+                output_ids, new_token, idx = medusa_infer(
                     torch.as_tensor(input_ids).cuda(),
                     model,
                     tokenizer,
@@ -302,7 +302,7 @@ def get_model_answers(
                 try:
                     torch.cuda.synchronize()
                     start_time = time.time()
-                    output_ids, new_token, idx = medusa_forward(
+                    output_ids, new_token, idx = medusa_infer(
                         torch.as_tensor(input_ids).cuda(),
                         model,
                         tokenizer,

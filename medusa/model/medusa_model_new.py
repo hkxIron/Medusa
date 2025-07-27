@@ -364,7 +364,7 @@ class MedusaLlamaModel(KVLlamaForCausalLM):
 
         reset_medusa_mode(self)
         # Initialize tree attention mask and process prefill tokens
-        medusa_logits, logits = initialize_medusa(
+        medusa_logits, logits = medusa_infer(
             input_ids, self, medusa_buffers["medusa_attn_mask"], past_key_values
         )
 

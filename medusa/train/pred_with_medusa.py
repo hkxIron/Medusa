@@ -232,19 +232,21 @@ def test_medusa():
             v_int = v.to(torch.int8).tolist()
             print(f"{v_int}")
 
-        # medusa_logits: [medusa_head=5, batch_size=1, seq_len=input_len=66, vocab_size]
-        # logits: [batch_size=1, seq_len=1+medusa_head=6, vocab_size]
-
+        print(f"{input_len=}")
         # model.past_key_values: [ [KvCache(key), KvCache(value)], [KvCache(key), KvCache(value)], ...], 有 num_hidden_layers 个 key-value kvcache对象
         # 每个KVCache.data的shape为 [batch_size, head_position_num, max_seq_len, head_dim]
         # model.past_key_values_data: [num_hidden_layers * 2, batch_size, head_position_num, input_len=66, head_dim]
-        medusa_logits, logits = initialize_medusa(input_ids, model, medusa_buffers["medusa_attn_mask"], past_key_values)
-        # cartesian_candidates_token_id: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5]
-        # treed_indices: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5]
+        # => 
+        # medusa_logits: [medusa_head=5, batch_size=1, seq_len=input_len=66, vocab_size]
+        # logits: [batch_size=1, seq_len=input_len=66, vocab_size]
+        medusa_logits, logits = medusa_infer(input_ids, model, medusa_buffers["medusa_attn_mask"], past_key_values)
+
+        # tree_indices: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5]
         # retrieve_indices: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5], 
         #                   格式为： [base_model.cur_token, head[0], head[1], head[2], head[3]]
+        # =>
+        # cartesian_candidates_token_id: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5]
         # tree_candidates_token_id: [batch=1, seq_len=64]
-        # 
         cartesian_candidates_token_id, tree_candidates_token_id = generate_candidates(
                 medusa_logits,
                 logits,

@@ -293,7 +293,7 @@ class MedusaModel(nn.Module):
         reset_medusa_mode(self)
         # Initialize tree attention mask and process prefill tokens
         # 1. 生成原始模型推理的logits，以及medusa的logits
-        medusa_logits, logits = initialize_medusa(
+        medusa_logits, logits = medusa_infer(
             input_ids, self, medusa_buffers["medusa_attn_mask"], past_key_values
         )
 
