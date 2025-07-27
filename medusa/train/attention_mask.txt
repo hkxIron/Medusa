@@ -479,6 +479,20 @@ attention_mask(其中0被替换为"_"，以方便观察):
 
 
 tree_indices: 共64个attention tree, 这里的tree_indices，其实就是attention中最后一个head中最后一个token的索引
+[0, 
+1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 
+11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 
+11, 12, 13, 14, 15, 16, 17, 11, 12, 13, 
+11, 12, 
+11, 11, 11, 11, 11, 11, 
+21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 
+21, 22, 23, 21, 22, 
+21, 21, 21, 21, 21, 
+21, 22, 
+21, 
+31, 32]
+
+
 
 注释：
 [
@@ -534,7 +548,12 @@ tree_indices: 共64个attention tree, 这里的tree_indices，其实就是attent
 31, 32
 ]
 
-medusa_position_ids:
+medusa_position_ids: 64个位置, 相同的position_ids，会导致rope时它们的相对位置相同
+# 即:
+# 所有head[0]的token，不论token[0]~token[9], 它们的位置id相同
+# 所有head[1]的token，不论token[0]~token[9], 它们的位置id相同
+# 因为尽管同一个head有多个候选token,但同一个head每次只能有一个token参与attention
+
 原始：[0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4]
 
 [
@@ -557,7 +576,16 @@ medusa_position_ids:
 # 62~63列,head[3].token[0:2]
 4, 4] 
 
-retrieve_indices:(是从attention_mask的最后一行开始的), 共42行
+retrieve_indices:从attention_mask的最后一行开始, 共42行, 5列
+# 取了里面的2个4阶attention
+# 部分3阶attention
+# 与2个2阶的attention
+# 所有待验证的路径，不能是已经出现的路径的前缀编码，否则会导致重复路径验证
+# 比如head[0]=["the", "a"], head[1]=["last", "day"], head[2]=["day", "choice"]
+# 若["the", "last", "day"]已出现在验证路径中时, 前缀路径 ["the", "last"]就无需单独验证了
+# 所以尽管总共有64条路径待验证，但由于相同前缀的原因，去除共同前缀后，只有42条路径待验证
+格式为：
+[base_model.cur_token, head[0], head[1], head[2], head[3]]
 
 [[0, 1, 11, 39, 63],  # base_model.cur_token + head[0].token[0]+head[1].token[0] + head[2].token[1] + head[3].token[1]
  [0, 1, 11, 39, 62],  # base_model.cur_token + head[0].token[0]+head[1].token[0] + head[2].token[1] + head[3].token[0]

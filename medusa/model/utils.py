@@ -151,6 +151,7 @@ def generate_medusa_buffers(medusa_choices:List[List[int]], device="cuda"):
     #第37列：medusa_head[1].token[0], attention前缀 base_model.cur_token+medusa_head[0].token[8]
     #第38列：medusa_head[1].token[0], attention前缀 base_model.cur_token+medusa_head[0].token[9]
     11, 11, 11, 11, 11, 11,  # 例如：其中11为head[1].token[0]的列索引
+    格式为： [base_model.cur_token, head[0], head[1], head[2], head[3]]
     """
     medusa_tree_indices = torch.zeros(medusa_len, dtype=torch.long) # shape:[64]
     medusa_tree_indices[0] = 0
@@ -190,6 +191,15 @@ def generate_medusa_buffers(medusa_choices:List[List[int]], device="cuda"):
         """
         cur_medusa_choice = sorted_medusa_choices[-i-1] # 从倒数第一个choices开始遍历
         retrieve_indice = []
+
+        """
+        若某个choice的父结点已经存在于retrieve_paths中，说明该choice已经验证过，无需再次验证
+
+        所有待验证的路径，不能是已经出现的路径的前缀编码，否则会导致重复路径验证
+        比如head[0]=["the", "a"], head[1]=["last", "day"], head[2]=["day", "choice"]
+        若["the", "last", "day"]已出现在验证路径中时, 前缀路径 ["the", "last"]就无需单独验证了
+        所以尽管总共有64条路径待验证，但由于相同前缀的原因，去除共同前缀后，只有42条路径待验证
+        """
         if cur_medusa_choice in retrieve_paths:
             continue
         else:
@@ -204,20 +214,21 @@ def generate_medusa_buffers(medusa_choices:List[List[int]], device="cuda"):
                     retrieve_paths.append(parent_of_cur_choice)
         retrieve_indices_nest.append(retrieve_indice)
 
-    max_length = max([len(x) for x in retrieve_indices_nest])
-    retrieve_indices = [pad_path(path, max_length, -2) for path in retrieve_indices_nest]
-    retrieve_indices = torch.tensor(retrieve_indices, dtype=torch.long)
-    retrieve_indices = retrieve_indices + 1 # 所有indexes +1
+    max_length = max([len(x) for x in retrieve_indices_nest]) # 最长的路径长度
+    
+    retrieve_token_indices = [pad_path(path, max_length, -2) for path in retrieve_indices_nest]
+    retrieve_token_indices = torch.tensor(retrieve_token_indices, dtype=torch.long)
+    retrieve_token_indices = retrieve_token_indices + 1 # 所有indexes +1
     # 将第0列的base_model.cur_token的index拼上
     # retrieve_indices.shape:[42, 1+max_length=5]
-    retrieve_indices = torch.cat([torch.zeros((retrieve_indices.shape[0], 1), dtype=torch.long), retrieve_indices], dim=1)
+    retrieve_token_indices = torch.cat([torch.zeros((retrieve_token_indices.shape[0], 1), dtype=torch.long), retrieve_token_indices], dim=1)
 
     # Aggregate the generated buffers into a dictionary
     medusa_buffers = {
         "medusa_attn_mask": medusa_attn_mask.unsqueeze(0).unsqueeze(0),
         "tree_indices": medusa_tree_indices,
         "medusa_position_ids": medusa_position_ids,
-        "retrieve_indices": retrieve_indices,
+        "retrieve_indices": retrieve_token_indices, # 无前缀的路径
         }
     
     # Move the tensors in the dictionary to the specified device
@@ -302,6 +313,8 @@ def reset_past_key_values(passed_key_values):
 
 def get_nucleus_one_token(logit, temperature, top_p):
     """
+    核采样
+
     Performs token sampling based on the nucleus (top-p) sampling method.
 
     This function selects a token from a given logit distribution using the nucleus sampling strategy.
@@ -348,21 +361,31 @@ def get_typical_one_token(logit, temperature, posterior_threshold, posterior_alp
     Returns:
         torch.Tensor: A tensor containing the indices of the sampled tokens.
     """
+    # logits:[batch, vocab_size]
     logit = logit / temperature
+    # probs:[batch, vocab_size]
     probs = torch.softmax(logit, dim=-1)
-    entropy = -torch.sum(
-            probs * torch.log(probs + 1e-5), dim=-1
-        )
+    # entropy:[batch], entropy = -∑p(x)logp(x)
+    entropy = -torch.sum(probs * torch.log(probs + 1e-5), dim=-1)
+    # entropy:[batch]
+    # threshold:[batch]
     threshold = torch.minimum(
             torch.ones_like(entropy) * posterior_threshold,
-            torch.exp(-entropy) * posterior_alpha,
+            torch.exp(-entropy) * posterior_alpha, # exp(-entropy), 即 熵越高，不确定性越高的， threshold概率越低
         )
+    # probs: [batch, vocab_size]
+    # indices_to_remove:[batch, vocab_size]
     indices_to_remove = probs < threshold.unsqueeze(-1)
-    logit[indices_to_remove] = float('-inf')
+    logit[indices_to_remove] = float('-inf') # 将概率低于threshold的token的logit置为-inf， 即不采样
+    # sampled_tokens: [batch]
     sampled_tokens = torch.multinomial(F.softmax(logit, dim=-1), 1)
     return sampled_tokens
 
-def generate_candidates(medusa_logits, logits, tree_indices, retrieve_indices, temperature = 0, posterior_threshold=0.3, posterior_alpha = 0.09, top_p=0.8, sampling = 'typical', fast = False):
+def generate_candidates(medusa_logits, 
+                        logits, 
+                        tree_indices, 
+                        retrieve_indices, 
+                        temperature = 0, posterior_threshold=0.3, posterior_alpha = 0.09, top_p=0.8, sampling = 'typical', fast = False):
     """
     Generate candidates based on provided logits and indices.
     
@@ -383,34 +406,81 @@ def generate_candidates(medusa_logits, logits, tree_indices, retrieve_indices, t
         1. Cartesian candidates derived from the combined original and Medusa logits.
         2. Tree candidates mapped from the Cartesian candidates using tree indices.
     """
+
+    # medusa_logits: [medusa_head=5, batch_size=1, seq_len=input_len, vocab_size]
+    # logits: [batch_size=1, seq_len=input_len=6, vocab_size]
+
     # Greedy decoding: Select the most probable candidate from the original logits.
     if temperature == 0 or fast:
-        candidates_logit = torch.argmax(logits[:, -1]).unsqueeze(0)
+        # logits: [batch_size=1, seq_len, vocab_size]
+        # 取最后一个medusa_head的预测结果
+        # base_model_candidates_idx: [batch_size=1]
+        base_model_candidates_idx = torch.argmax(logits[:, -1]).unsqueeze(0) # 贪婪采样
     else:
-        if sampling == 'typical':
-            candidates_logit = get_typical_one_token(logits[:, -1], temperature, posterior_threshold, posterior_alpha).squeeze(0)
+        if sampling == 'typical': # 
+            base_model_candidates_idx = get_typical_one_token(logits[:, -1], temperature, posterior_threshold, posterior_alpha).squeeze(0)
         elif sampling == 'nucleus': # 核采样
-            candidates_logit = get_nucleus_one_token(logits[:, -1], temperature, top_p).squeeze(0)
+            base_model_candidates_idx = get_nucleus_one_token(logits[:, -1], temperature, top_p).squeeze(0)
         else:
             raise NotImplementedError
+
     # Extract the TOPK candidates from the medusa logits.
-    candidates_medusa_logits = torch.topk(medusa_logits[:, 0, -1], TOPK, dim = -1).indices
+    # medusa_logits: [medusa_head=5, batch_size=1, seq_len, vocab_size]
+    # 对每个medusa_head的预测序列的最后一个token取topK, 因为每个step也只预测一次
+    # candidates_medusa_logits_idx: [medusa_head=5, vocab_size=topK]
+    candidates_medusa_logits_idx = torch.topk(medusa_logits[:, 0, -1], k=TOPK, dim = -1).indices
 
     # Combine the selected candidate from the original logits with the topk medusa logits.
-    candidates = torch.cat([candidates_logit, candidates_medusa_logits.view(-1)], dim=-1)
+    # base_model_candidates_idx: [batch_size=1]
+    # candidates_medusa_logits_idx: [medusa_head=5, vocab_size=topK]
+    # 将base_model_pred和medusa头的猜测拼接起来，作为新的输入
+    # candidates_idx: [seq_len=1+medusa_head*top_k=1+5*10=51]
+    candidates_token_id = torch.cat([base_model_candidates_idx, candidates_medusa_logits_idx.view(-1)], dim=-1)
 
+    """
+    tree_indices: [seq_len=1+medusa_head*top_k=1+5*10=51]
+        [0, 
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 
+        11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 
+        11, 12, 13, 14, 15, 16, 17, 11, 12, 13, 
+        11, 12, 
+        11, 11, 11, 11, 11, 11, 
+        21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 
+        21, 22, 23, 21, 22, 
+        21, 21, 21, 21, 21, 
+        21, 22, 
+        21, 
+        31, 32]
+    tree_candidates: [seq_len=64]
+    """
     # Map the combined candidates to the tree indices to get tree candidates.
-    tree_candidates = candidates[tree_indices]
+    #print(f"{candidates_idx.shape=}")
+    #tree_candidates_token_id: [seq_len=64]
+    tree_candidates_token_id = candidates_token_id[tree_indices]
 
     # Extend the tree candidates by appending a zero.
-    tree_candidates_ext = torch.cat([tree_candidates, torch.zeros((1), dtype=torch.long, device=tree_candidates.device)], dim=0)
+    #tree_candidates_token_id: [seq_len=64]
+    #tree_candidates_token_id_ext: [seq_len=64+1=65]
+    tree_candidates_token_id_ext = torch.cat([tree_candidates_token_id, torch.zeros((1), dtype=torch.long, device=tree_candidates_token_id.device)], dim=0)
 
+    """
+    retrieve_indices: 共42行
+    [[0, 1, 11, 39, 63], # base_model.cur_token + head[0].token[0]+head[1].token[0] + head[2].token[1] + head[3].token[1]
+    [0, 1, 11, 39, 62],  # base_model.cur_token + head[0].token[0]+head[1].token[0] + head[2].token[1] + head[3].token[0]
+    [0, 3, 28, 61, -1],  # base_model.cur_token + head[0].token[2]+head[1].token[0] + head[2].token[0]
+    [0, 2, 21, 60, -1],
+    ...
+    """
     # Retrieve the cartesian candidates using the retrieve indices.
-    cart_candidates = tree_candidates_ext[retrieve_indices]
+    # cartesian_candidates_token_id: [seq_len=42, head_num=base_model.cur_token+head[0...4]=5]
+    # 即从vocab中选出组成tree attention的token_id, 为后面attention作准备 
+    cartesian_candidates_token_id = tree_candidates_token_id_ext[retrieve_indices]
 
     # Unsqueeze the tree candidates for dimension consistency.
-    tree_candidates = tree_candidates.unsqueeze(0)
-    return cart_candidates, tree_candidates
+    # cartesian_candidates_token_id: [seq_len=42, head_num=base_model.cur_token+head[0...4]=5]
+    # tree_candidates_token_id: [batch=1, seq_len=64]
+    tree_candidates_token_id = tree_candidates_token_id.unsqueeze(0)
+    return cartesian_candidates_token_id, tree_candidates_token_id
 
 
 def tree_decoding(
@@ -437,10 +507,21 @@ def tree_decoding(
     """
 
     # Compute new position IDs by adding the Medusa position IDs to the length of the input sequence.
+    # input_ids: [batch_size=1, seq_len]
+
+    # medusa_position_ids: [seq_len=path_choice_num=64]
+    # position_ids: [seq_len=64], 为在input_ids的位置上加上偏移 medusa_position_ids
     position_ids = medusa_position_ids + input_ids.shape[1]
 
     # Use the model to decode the tree candidates. 
     # The model is expected to return logits for the Medusa structure, original logits, and possibly other outputs.
+
+    # tree_candidates: [batch=1, seq_len=64] 
+    # position_ids: [seq_len=64], 为在input_ids的位置上加上偏移 medusa_position_ids
+
+    # tree_medusa_logits: [medusa_head=5, batch_size=1, seq_len=64, vocab_size]
+    # outputs: other outputs from the model
+    # tree_logits: [batch_size=1, seq_len, vocab_size]
     tree_medusa_logits, outputs, tree_logits = model.forward(
         tree_candidates,
         output_orig=True,
@@ -450,9 +531,17 @@ def tree_decoding(
     )
     
     # Reorder the obtained logits based on the retrieve_indices to ensure consistency with some reference ordering.
+    # tree_logits: [batch_size=1, seq_len=64, vocab_size]
+    # retrieve_indices: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5]
+    # logits: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
     logits = tree_logits[0, retrieve_indices]
+
+    # tree_medusa_logits: [medusa_head=5, batch_size=1, seq_len=64, vocab_size]
+    # medusa_logits: [medusa_head=5, seq_len=42, head_position_num=5, vocab_size]
     medusa_logits = tree_medusa_logits[:, 0, retrieve_indices]
+    # logits: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
     return medusa_logits, logits, outputs
+
 
 def get_nucleus_posterior_mask(logits, candidates, temperature, top_p):
     """
@@ -543,7 +632,7 @@ def get_typical_posterior_mask(logits, candidates, temperature, posterior_thresh
     
 
 def evaluate_posterior(
-    logits, candidates, temperature, posterior_threshold=0.3, posterior_alpha = 0.09, top_p=0.8, sampling = 'typical', fast = True
+    logits, candidate_token_ids, temperature, posterior_threshold=0.3, posterior_alpha = 0.09, top_p=0.8, sampling = 'typical', fast = True
 ):
     """
     Evaluate the posterior probabilities of the candidates based on the provided logits and choose the best candidate.
@@ -567,24 +656,28 @@ def evaluate_posterior(
     # Greedy decoding based on temperature value
     if temperature == 0:
         # Find the tokens that match the maximum logits for each position in the sequence
-        posterior_mask = (
-            candidates[:, 1:] == torch.argmax(logits[:, :-1], dim=-1)
-        ).int()
+        # logits: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
+        # candidates_token_id: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5]
+        # posterior_mask: [seq_len=42, 4]
+        posterior_mask = (candidate_token_ids[:, 1:] == torch.argmax(logits[:, :-1], dim=-1)).int()
+        # 求接受的token个数
+        # candidates_accept_length:[seq_len=42]
         candidates_accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
         accept_length = candidates_accept_length.max()
         # Choose the best candidate
         if accept_length == 0:
             # Default to the first candidate if none are accepted
-            best_candidate = torch.tensor(0, dtype=torch.long, device=candidates.device)
+            best_candidate_idx = torch.tensor(0, dtype=torch.long, device=candidate_token_ids.device)
         else:
-            best_candidate = torch.argmax(candidates_accept_length).to(torch.long)
-        return best_candidate, accept_length
+            # 选择接受最多的candidate所在的index
+            best_candidate_idx = torch.argmax(candidates_accept_length).to(torch.long)
+        return best_candidate_idx, accept_length
         
     if sampling == 'typical':
         if fast:
             posterior_prob = torch.softmax(logits[:, :-1] / temperature, dim=-1)
             candidates_prob = torch.gather(
-                posterior_prob, dim=-1, index=candidates[:, 1:].unsqueeze(-1)
+                posterior_prob, dim=-1, index=candidate_token_ids[:, 1:].unsqueeze(-1)
             ).squeeze(-1)
             posterior_entropy = -torch.sum(
                 posterior_prob * torch.log(posterior_prob + 1e-5), dim=-1
@@ -600,43 +693,44 @@ def evaluate_posterior(
             accept_length = candidates_accept_length.max()
             if accept_length == 0:
                 # If no candidates are accepted, just choose the first one
-                best_candidate = torch.tensor(0, dtype=torch.long, device=candidates.device)
+                best_candidate_idx = torch.tensor(0, dtype=torch.long, device=candidate_token_ids.device)
             else:
                 best_candidates = torch.where(candidates_accept_length == accept_length)[0]
                 # Accept the best one according to likelihood
                 likelihood = torch.sum(
                     torch.log(candidates_prob[best_candidates, :accept_length]), dim=-1
                 )
-                best_candidate = best_candidates[torch.argmax(likelihood)]
-            return best_candidate, accept_length
+                best_candidate_idx = best_candidates[torch.argmax(likelihood)]
+            return best_candidate_idx, accept_length
         # Calculate posterior probabilities and thresholds for candidate selection
-        posterior_mask = get_typical_posterior_mask(logits, candidates, temperature, posterior_threshold, posterior_alpha, fast)
+        posterior_mask = get_typical_posterior_mask(logits, candidate_token_ids, temperature, posterior_threshold, posterior_alpha, fast)
         candidates_accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
         # Choose the best candidate based on the evaluated posterior probabilities
         accept_length = candidates_accept_length.max()
         
         if accept_length == 0:
             # If no candidates are accepted, just choose the first one
-            best_candidate = torch.tensor(0, dtype=torch.long, device=candidates.device)
+            best_candidate_idx = torch.tensor(0, dtype=torch.long, device=candidate_token_ids.device)
         else:
-            best_candidate = torch.argmax(candidates_accept_length).to(torch.long)
+            best_candidate_idx = torch.argmax(candidates_accept_length).to(torch.long)
             # Accept the best one according to likelihood
-        return best_candidate, accept_length
+        return best_candidate_idx, accept_length
     
     if sampling == 'nucleus':
         assert top_p < 1.0 + 1e-6, "top_p should between 0 and 1"
-        posterior_mask = get_nucleus_posterior_mask(logits, candidates, temperature, top_p)
+        posterior_mask = get_nucleus_posterior_mask(logits, candidate_token_ids, temperature, top_p)
         candidates_accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
         accept_length = candidates_accept_length.max()
         # Choose the best candidate
         if accept_length == 0:
             # Default to the first candidate if none are accepted
-            best_candidate = torch.tensor(0, dtype=torch.long, device=candidates.device)
+            best_candidate_idx = torch.tensor(0, dtype=torch.long, device=candidate_token_ids.device)
         else:
-            best_candidate = torch.argmax(candidates_accept_length).to(torch.long)
-        return best_candidate, accept_length
+            best_candidate_idx = torch.argmax(candidates_accept_length).to(torch.long)
+        return best_candidate_idx, accept_length
     else:
         raise NotImplementedError
+
 def update_inference_inputs(
     input_ids,
     candidates,
