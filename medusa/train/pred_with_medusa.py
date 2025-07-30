@@ -267,11 +267,12 @@ def test_medusa():
         The `evaluate_posterior` performs the verification of the tree.
         """
         # 推理
-        # medusa_position_ids: [seq_len=path_choice_num=64]
-        # retrieve_indices: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5]
+        # tree_candidates_token_id: [batch=1, seq_len=64]
+        # medusa_position_ids: [seq_len=all_path_num=64]
+        # retrieve_indices: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
         # =>
-        # medusa_logits: [medusa_head=5, seq_len=42, head_position_num=5, vocab_size]
-        # logits: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
+        # medusa_logits: [medusa_head=5, path_num=42, head_position_num=5, vocab_size]
+        # logits: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
         medusa_logits, logits, outputs = tree_decoding(
                     model,
                     tree_candidates_token_id,
@@ -281,12 +282,15 @@ def test_medusa():
                     medusa_buffers["retrieve_indices"],
                 )
         # 验证
-        # logits: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
-        # cartesian_candidates_token_id: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5]
+        # logits: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
+        # cartesian_candidates_token_id: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
         # best_candidate: int
         # accept_length: int
-        best_candidate, accept_length = evaluate_posterior(logits, cartesian_candidates_token_id, 
-                                                           temperature = 0, posterior_threshold = 0, posterior_alpha = 0)
+        best_candidate, accept_length = evaluate_posterior(logits, 
+                                                           cartesian_candidates_token_id, 
+                                                           temperature = 0, 
+                                                           posterior_threshold = 0, 
+                                                           posterior_alpha = 0)
 
         print('Medusa logits shape', medusa_logits.shape)
         print('Logits shape', logits.shape)

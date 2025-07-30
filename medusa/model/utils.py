@@ -434,7 +434,7 @@ def generate_candidates(medusa_logits,
     # Extract the TOPK candidates from the medusa logits.
     # medusa_logits: [medusa_head=5, batch_size=1, seq_len, vocab_size]
     # 对每个medusa_head的预测序列的最后一个位置取topK, 因为每个step也只预测一次
-    # candidates_medusa_logits_id: [medusa_head=5, vocab_size=topK], 注意：是每个head均取topK
+    # candidates_medusa_logits_id: [medusa_head=5, vocab_size=topK], 注意：是每个medusa head均取topK
     candidates_medusa_logits_id = torch.topk(medusa_logits[:, 0, -1], k=TOPK, dim = -1).indices
 
     # Combine the selected candidate from the original logits with the topk medusa logits.
@@ -447,35 +447,40 @@ def generate_candidates(medusa_logits,
 
     """
     medusa_last_attn_token_indices: [seq_len=1+medusa_head*top_k=1+5*10=51]
-    共64个attention tree, 这里的tree_indices，其实就是每个tree中参与attention的最后一个token的索引
+    tree_indices,共64个attention tree, 其实就是每个tree中参与attention的最后一个token的索引
         [0, 
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 
+
         11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 
-        11, 12, 13, 14, 15, 16, 17, 11, 12, 13, 
+        11, 12, 13, 14, 15, 16, 17, 
+        11, 12, 13, 
         11, 12, 
         11, 11, 11, 11, 11, 11, 
+
         21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 
-        21, 22, 23, 21, 22, 
+        21, 22, 23, 
+        21, 22, 
         21, 21, 21, 21, 21, 
+
         21, 22, 
         21, 
         31, 32]
     tree_candidates_token_id: [seq_len=64]
     """
     # Map the combined candidates to the tree indices to get tree candidates.
-    #print(f"{candidates_idx.shape=}")
-    #tree_candidates_token_id: [seq_len=64]
+    # print(f"{candidates_idx.shape=}")
+    # tree_candidates_token_id: [seq_len=64]
     # 即从51个候选token中，选出64个token组成tree attention的token_id, 每一个均为tree attention的最后一个位置的token
     # 注意：tree_candidates_token_id可能有重复的token
     tree_candidates_token_id = candidates_token_id[medusa_last_attn_token_indices]
 
     # Extend the tree candidates by appending a zero.
     #tree_candidates_token_id: [seq_len=64]
-    #tree_candidates_token_id_ext: [seq_len=1+64=65]
-    tree_candidates_token_id_ext = torch.cat([tree_candidates_token_id, torch.zeros((1), 
-                                                                                    dtype=torch.long, 
-                                                                                    device=tree_candidates_token_id.device)], 
-                                                                                    dim=0)
+    #tree_candidates_token_id_ext: [seq_len=64+1=65], 这个0是为了后面index=-1的token准备的
+    tree_candidates_token_id_ext = torch.cat([tree_candidates_token_id, 
+                                                               torch.zeros((1), dtype=torch.long, device=tree_candidates_token_id.device)
+                                                             ], 
+                                                    dim=0)
 
     """
     retrieve_indices:从attention_mask的最后一行开始, 共42行, 5列
@@ -496,6 +501,7 @@ def generate_candidates(medusa_logits,
     ...
     """
     # Retrieve the cartesian candidates using the retrieve indices.
+    # retrieve_token_indices: [42, 5], 其中-1会取到ext中的最后一个0
     # cartesian_candidates_token_id: [seq_len=42, head_num=base_model.cur_token+head[0...4]=5]
     # 即从vocab中选出组成tree attention的token_id, 为后面attention作准备 
     cartesian_candidates_token_id = tree_candidates_token_id_ext[retrieve_token_indices]
@@ -541,17 +547,16 @@ def tree_decoding(
     # 所有head[1]的token，不论token[0]~token[9], 它们的位置id相同
     # 因为尽管同一个head有多个候选token,但同一个head每次只能有一个token参与attention
     """
-    position_ids = medusa_position_ids + input_ids.shape[1]
+    position_ids = medusa_position_ids + input_ids.shape[1] # 在medusa_position_ids上偏移input_ids的长度
 
     # Use the model to decode the tree candidates. 
     # The model is expected to return logits for the Medusa structure, original logits, and possibly other outputs.
 
     # tree_candidates: [batch=1, seq_len=64] 
     # position_ids: [seq_len=64], 为在input_ids的位置上加上偏移 medusa_position_ids
-
+    # =>
     # tree_medusa_logits: [medusa_head=5, batch_size=1, seq_len=64, vocab_size]
-    # outputs: other outputs from the model
-    # tree_logits: [batch_size=1, seq_len, vocab_size]
+    # tree_logits: [batch_size=1, seq_len=64, vocab_size]
     tree_medusa_logits, outputs, tree_logits = model.forward(
         tree_candidates,
         output_orig=True,
@@ -562,12 +567,14 @@ def tree_decoding(
     
     # Reorder the obtained logits based on the retrieve_indices to ensure consistency with some reference ordering.
     # tree_logits: [batch_size=1, seq_len=64, vocab_size]
-    # retrieve_indices: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5]
+    # retrieve_token_indices: [seq_len=42, head_position_num=base_model.cur_token+head[0,1,2,3]=5]
     # logits: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
     logits = tree_logits[0, retrieve_token_indices]
 
     # tree_medusa_logits: [medusa_head=5, batch_size=1, seq_len=64, vocab_size]
-    # medusa_logits: [medusa_head=5, seq_len=42, head_position_num=5, vocab_size]
+    # retrieve_token_indices: [path_num=42, head_position_num=base_model.cur_token+head[0,1,2,3]=5]
+    # =>
+    # medusa_logits: [medusa_head=5, path_num=42, head_position_num=5, vocab_size]
     medusa_logits = tree_medusa_logits[:, 0, retrieve_token_indices]
     # logits: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
     return medusa_logits, logits, outputs
@@ -686,9 +693,9 @@ def evaluate_posterior(
     # Greedy decoding based on temperature value
     if temperature == 0:
         # Find the tokens that match the maximum logits for each position in the sequence
-        # logits: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
-        # candidates_token_id: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5]
-        # posterior_mask: [seq_len=42, 4]
+        # logits: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
+        # candidates_token_id: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
+        # posterior_mask: [path_num=42, 4]
         posterior_mask = (candidate_token_ids[:, 1:] == torch.argmax(logits[:, :-1], dim=-1)).int()
         # 求接受的token个数
         # candidates_accept_length:[seq_len=42]
@@ -699,7 +706,7 @@ def evaluate_posterior(
             # Default to the first candidate if none are accepted
             best_candidate_idx = torch.tensor(0, dtype=torch.long, device=candidate_token_ids.device)
         else:
-            # 选择接受最多的candidate所在的index
+            # 选择接受最多的candidate所在的index, 即接受最长的candidate所在的index
             best_candidate_idx = torch.argmax(candidates_accept_length).to(torch.long)
         return best_candidate_idx, accept_length
         
