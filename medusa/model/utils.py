@@ -52,7 +52,7 @@ def generate_medusa_buffers(medusa_choices:List[List[int]], device="cuda"):
 
     """
     参见attention_mask.txt中的注释
-    以mc_sim_7b_63为例
+    以mc_sim_7b_63为例, 63为有63个token
 
     sorted_medusa_choices中每行均为一个,
     格式为:[head[0],token[i], head[1].token[j], head[2].token[k],...]
@@ -120,7 +120,7 @@ def generate_medusa_buffers(medusa_choices:List[List[int]], device="cuda"):
             # 若choice长度>1, 2~4阶attention查找父节点
             ancestor_idx = []
             """
-            cur_medusa_choice: [0, 1, 0]
+            cur_medusa_choice: [0, 1, 2]
               => [head[0].token[0], head[1].token[1], head[2].token[0:3]]
               父结点为：[0], [0, 1]
             """
@@ -128,7 +128,11 @@ def generate_medusa_buffers(medusa_choices:List[List[int]], device="cuda"):
                 # 在当前行中查找父节点
                 # list.index(): 返回cur_medusa_choice[:c+1]在sorted_medusa_choices中的索引, 即查找父节点
                 current_parent_choice_index = sorted_medusa_choices.index(cur_medusa_choice[:c+1])
-                # 注意：此处查找的是所有的父结点，而只是一个父结点
+                """ 
+                NOTE：此处查找的是所有的父结点，而不只是一个父结点, 为什么要查找所有的父结点？
+                因为所有的父结点均需要参与attention计算, 所以可以理解为查找所有参与attention的token，将它们的mask设置为1
+                """
+                # 如: [0,1,2]的父结点为：[0], [0, 1]
                 ancestor_idx.append(current_parent_choice_index + 1) #  +1是为了后面索引到本身
             # j + start+1：当前行的索引,其中的+1是因为第一行为base_model.cur_token
             medusa_attn_mask[j + start + 1, ancestor_idx] = 1 # 将所有父节点设置为1
@@ -140,6 +144,7 @@ def generate_medusa_buffers(medusa_choices:List[List[int]], device="cuda"):
     # Generate tree indices for the Medusa structure
     """
     这里的tree_indices，其实就是attention中最后一个head中最后一个token的索引, 即参与attention的最后一个token的索引
+    为何称为tree_indices？因为attention_mask中每一行的attention均可以看成一个tree
 
     #第31～32列：medusa_head[1].token[0:2], attention前缀 base_model.cur_token+medusa_head[0].token[3]
     11, 12,  # 例如：其中11为head[1].token[0]的列索引, 12为head[1].token[1]的列索引

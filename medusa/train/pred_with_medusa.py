@@ -111,6 +111,12 @@ def pred_step():
     # ---------------
     #args = dict(medusa_num_heads=medusa_config.medusa_num_heads, medusa_num_layers=medusa_config.medusa_num_layers)
     model = MedusaModel.from_pretrained(base_model_path=base_model_path, medusa_head_path=medusa_model_path)
+    # 注意：此处为了debug, 临时增加了medusa_head
+    with torch.inference_mode():
+        add_heads_num = 3
+        model.medusa_head.extend([copy.deepcopy(model.medusa_head[0]) for _ in range(add_heads_num)])
+        model.medusa_num_heads += add_heads_num
+
     print(f"{model=}")
     prompt="为以下关键词生成一条广告语。类型#裙*颜色#蓝色*风格#清新*图案#蝴蝶结"   
     inputs = model.tokenizer(prompt, return_tensors="pt")
@@ -132,7 +138,6 @@ def pred_step():
     print('Input token length:', len(input_ids[0]))
     print('Init KV cache shape for attention modules:', model.past_key_values[0][0].shape, model.past_key_values[0][1].shape)
 
-    return 
     inference_count = 0
     accept_lengths = []
     with torch.inference_mode():
@@ -169,7 +174,7 @@ def pred_step():
             if tokenizer.eos_token_id in pred[0, :accept_length + 1]:
                 break
 
-def test_medusa():
+def test_medusa_step():
     base_model_path = "/home/hkx/data/work/hf_data_and_model/models/MoZhang96/TinyStories-LLaMA2-20M-256h-4l-GQA"
     #medusa_model_path = "/home/hkx/data/work/open/Medusa/llama_medusa_output_medusa_mlp_TinyStories-LLaMA2-20M-256h-4l-GQA_medusa_2_lr_0.001_layers_1" 
     medusa_model_path = "/home/hkx/data/work/open/Medusa/llama_medusa_output2_medusa_mlp_TinyStories-LLaMA2-20M-256h-4l-GQA_medusa_2_lr_0.001_layers_1" 
@@ -260,7 +265,6 @@ def test_medusa():
         print('Most left 2 candidates path:', tokenizer.batch_decode(cartesian_candidates_token_id[0]), tokenizer.batch_decode(cartesian_candidates_token_id[1]))
         print('Another candidate path:', tokenizer.batch_decode(cartesian_candidates_token_id[-1]))
 
-    with torch.inference_mode():
         """
         The `tree_decoding` performs the tree-attention-based inference.
 
@@ -274,6 +278,7 @@ def test_medusa():
         # =>
         # medusa_logits: [medusa_head=5, path_num=42, head_position_num=5, vocab_size]
         # logits: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
+        # NOTE: 此处会进行模型的前向传播
         medusa_logits, logits, outputs = tree_decoding(
                     model,
                     tree_candidates_token_id,
@@ -337,6 +342,107 @@ def test_medusa():
     print(f'{medusa_logits.shape=}')
     print(f'{new_token=}')
 
+def test_medusa_all():
+    base_model_path = "/home/hkx/data/work/hf_data_and_model/models/MoZhang96/TinyStories-LLaMA2-20M-256h-4l-GQA"
+    #medusa_model_path = "/home/hkx/data/work/open/Medusa/llama_medusa_output_medusa_mlp_TinyStories-LLaMA2-20M-256h-4l-GQA_medusa_2_lr_0.001_layers_1" 
+    medusa_model_path = "/home/hkx/data/work/open/Medusa/llama_medusa_output2_medusa_mlp_TinyStories-LLaMA2-20M-256h-4l-GQA_medusa_2_lr_0.001_layers_1" 
+
+    # ---------------
+    model: MedusaModel = MedusaModel.from_pretrained(base_model_path=base_model_path, medusa_head_path=medusa_model_path)
+    # 注意：此处为了debug, 临时增加了medusa_head
+    with torch.inference_mode():
+        add_heads_num = 3
+        model.medusa_head.extend([copy.deepcopy(model.medusa_head[0]) for _ in range(add_heads_num)])
+        model.medusa_num_heads += add_heads_num
+
+    print(f"{model=}")
+
+
+    tokenizer = model.get_tokenizer()
+    medusa_choices = mc_sim_7b_63
+
+    # model.past_key_values: [ [KvCache(key), KvCache(value)], [KvCache(key), KvCache(value)], ...], 有 num_hidden_layers 个 key-value kvcache对象
+    # 每个KVCache.data的shape为 [batch_size, head_num, max_seq_len, head_dim]
+    # model.past_key_values_data: [num_hidden_layers * 2, batch_size, head_num, max_seq_len, head_dim]
+    # model.current_legth_data: [num_hidden_layers * 2]
+    past_key_values, past_key_values_data, current_length_data = initialize_past_key_values(model.base_model)
+    model.past_key_values = past_key_values
+    model.past_key_values_data = past_key_values_data
+    model.current_length_data = current_length_data
+    print(f"{model.base_model.config.max_position_embeddings=}") # 2048
+    print(f"第0层的key的cache分配的内存张量大小:{past_key_values[0][0].data.shape=}") # (1, 8, 2048, 16)
+    print(f"第0层的key的cache实际有效数据的张量大小:{past_key_values[0][0].shape=}") # (1, 8, 0, 16)
+
+    prompt = "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions. USER: Hi, could you share a tale about a charming llama that grows Medusa-like hair and starts its own coffee shop? ASSISTANT:"
+    print(prompt)
+    input_ids = tokenizer([prompt]).input_ids
+    input_len = len(input_ids[0])
+    print('Input token length:', len(input_ids[0]))
+    # 打印第0层的KV cache 中的key, value的shape, shape: [batch_size, head_num, cache_seq_len, head_dim]
+    print('Init KV cache shape for attention modules:', model.past_key_values[0][0].shape, model.past_key_values[0][1].shape)
+    print(f'当前各层的缓存长度:{model.current_length_data}  layer_number:{model.current_length_data.shape[0]}')
+
+    torch.set_printoptions(profile="default", linewidth=200, threshold=1000)
+
+    accept_lengths_tree = []
+
+    with torch.inference_mode():
+        new_token = 0
+        input_ids = tokenizer([prompt]).input_ids
+        input_len = len(input_ids[0])
+        input_ids = torch.as_tensor(input_ids) #.cuda()
+        model.current_length_data.zero_() # this is for rerun
+        reset_medusa_mode(model)
+        medusa_buffers = generate_medusa_buffers(medusa_choices, device=model.base_model.device)
+        medusa_logits, logits = medusa_infer(input_ids, model, medusa_buffers["medusa_attn_mask"], past_key_values)
+        cur_length = input_len + 1
+        accept_lengths_tree.append(1)
+
+        max_new_tokens = 1024 
+        for i in range(max_new_tokens):
+            candidates, tree_candidates = generate_candidates(
+                    medusa_logits,
+                    logits,
+                    medusa_buffers["tree_indices"],
+                    medusa_buffers["retrieve_indices"],
+                )
+            # NOTE: 此处会进行模型的前向传播
+            medusa_logits, logits, outputs = tree_decoding(
+                    model,
+                    tree_candidates,
+                    past_key_values,
+                    medusa_buffers["medusa_position_ids"],
+                    input_ids,
+                    medusa_buffers["retrieve_indices"],
+                )
+            best_candidate, accept_length = evaluate_posterior(
+                    logits, candidates, temperature = 0, posterior_threshold = 0, posterior_alpha = 0
+                )
+            input_ids, logits, medusa_logits, new_token = update_inference_inputs(
+                    input_ids,
+                    candidates,
+                    best_candidate,
+                    accept_length,
+                    medusa_buffers["retrieve_indices"],
+                    outputs,
+                    logits,
+                    medusa_logits,
+                    new_token,
+                    past_key_values_data,
+                    current_length_data,
+                )
+            
+            accept_length_tree = input_ids.shape[1] - cur_length
+            cur_length = accept_length_tree + cur_length
+            accept_lengths_tree.append(accept_length_tree)
+
+            if model.tokenizer.eos_token_id in input_ids[0, input_len:]:
+                break
+
+        print('Decode:', tokenizer.batch_decode(input_ids[:,input_len:]))
+
+
 if __name__ == "__main__":
     #pred_step()
-    test_medusa()
+    test_medusa_step()
+    #test_medusa_all()
