@@ -293,7 +293,7 @@ class MedusaModel(nn.Module):
         reset_medusa_mode(self)
         # Initialize tree attention mask and process prefill tokens
         # 1. 生成原始模型推理的logits，以及medusa的logits
-        medusa_logits, logits = medusa_infer(
+        medusa_logits, logits = medusa_init_then_infer(
             input_ids, self, medusa_buffers["medusa_attn_mask"], past_key_values
         )
 
@@ -303,7 +303,7 @@ class MedusaModel(nn.Module):
         for idx in range(max_steps):
             # 2. 生成各medusa头的候选集
             # Generate candidates with topk predictions from Medusa heads
-            candidates, tree_candidates = generate_candidates(
+            candidates, tree_candidates = generate_candidates_from_medusa_head(
                 medusa_logits,
                 logits,
                 medusa_buffers["tree_indices"],

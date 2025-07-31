@@ -127,10 +127,10 @@ def pred_step():
     past_key_values, past_key_values_data, current_length_data = initialize_past_key_values(model.base_model)
     model.past_key_values = past_key_values
     model.past_key_values_data = past_key_values_data
-    model.current_length_data = current_length_data
+    model.current_length_of_each_layer = current_length_data
 
     # ==================================
-    model.current_length_data.zero_() # this is for rerun
+    model.current_length_of_each_layer.zero_() # this is for rerun
     prompt = "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions. USER: Hi, could you share a tale about a charming llama that grows Medusa-like hair and starts its own coffee shop? ASSISTANT:"
     print(prompt)
     input_ids = tokenizer([prompt]).input_ids
@@ -144,7 +144,7 @@ def pred_step():
         input_ids = tokenizer([prompt]).input_ids
         input_len = len(input_ids[0])
         input_ids = torch.as_tensor(input_ids) #.cuda()
-        model.current_length_data.zero_() # this is for rerun
+        model.current_length_of_each_layer.zero_() # this is for rerun
         medusa_logits, outputs, logits = model.forward(input_ids, output_orig = True, past_key_values=model.past_key_values)
         inference_count += 1
 
@@ -166,7 +166,7 @@ def pred_step():
             accept_length = torch.cumprod(posterior_mask, dim = -1).sum().item()
             cur_length = cur_length + accept_length + 1
             # update kv cache
-            model.current_length_data.fill_(cur_length)
+            model.current_length_of_each_layer.fill_(cur_length)
             # create new input
             preds = torch.cat([pred[:, accept_length], medusa_pred[:,0,accept_length]], dim = -1)
             print(f'Prediction @ {inference_count}: {tokenizer.batch_decode(pred[0, :accept_length + 1])}')
@@ -205,10 +205,10 @@ def test_medusa_step():
     # 每个KVCache.data的shape为 [batch_size, head_num, max_seq_len, head_dim]
     # model.past_key_values_data: [num_hidden_layers * 2, batch_size, head_num, max_seq_len, head_dim]
     # model.current_legth_data: [num_hidden_layers * 2]
-    past_key_values, past_key_values_data, current_length_data = initialize_past_key_values(model.base_model)
+    past_key_values, past_key_values_data, current_length_of_each_layer = initialize_past_key_values(model.base_model)
     model.past_key_values = past_key_values
     model.past_key_values_data = past_key_values_data
-    model.current_length_data = current_length_data
+    model.current_length_of_each_layer = current_length_of_each_layer
     print(f"{model.base_model.config.max_position_embeddings=}") # 2048
     print(f"第0层的key的cache分配的内存张量大小:{past_key_values[0][0].data.shape=}") # (1, 8, 2048, 16)
     print(f"第0层的key的cache实际有效数据的张量大小:{past_key_values[0][0].shape=}") # (1, 8, 0, 16)
@@ -220,7 +220,7 @@ def test_medusa_step():
     print('Input token length:', len(input_ids[0]))
     # 打印第0层的KV cache 中的key, value的shape, shape: [batch_size, head_num, cache_seq_len, head_dim]
     print('Init KV cache shape for attention modules:', model.past_key_values[0][0].shape, model.past_key_values[0][1].shape)
-    print(f'当前各层的缓存长度:{model.current_length_data}  layer_number:{model.current_length_data.shape[0]}')
+    print(f'当前各层的缓存长度:{model.current_length_of_each_layer}  layer_number:{model.current_length_of_each_layer.shape[0]}')
 
     torch.set_printoptions(profile="default", linewidth=200, threshold=1000)
 
@@ -229,7 +229,7 @@ def test_medusa_step():
         input_ids = tokenizer([prompt]).input_ids
         input_len = len(input_ids[0])
         input_ids = torch.as_tensor(input_ids) #.cuda()
-        model.current_length_data.zero_() # this is for rerun
+        model.current_length_of_each_layer.zero_() # this is for rerun
         reset_medusa_mode(model)
         medusa_buffers: dict[str, torch.Tensor] = generate_medusa_buffers( medusa_choices, device=model.base_model.device)
         for k, v in medusa_buffers.items():
@@ -238,21 +238,23 @@ def test_medusa_step():
             print(f"{v_int}")
 
         print(f"{input_len=}")
+
         # model.past_key_values: [ [KvCache(key), KvCache(value)], [KvCache(key), KvCache(value)], ...], 有 num_hidden_layers 个 key-value kvcache对象
         # 每个KVCache.data的shape为 [batch_size, head_position_num, max_seq_len, head_dim]
         # model.past_key_values_data: [num_hidden_layers * 2, batch_size, head_position_num, input_len=66, head_dim]
+        # medusa_attn_mask: [path_num=64, path_num=64]
         # => 
         # medusa_logits: [medusa_head=5, batch_size=1, seq_len=input_len=66, vocab_size]
         # logits: [batch_size=1, seq_len=input_len=66, vocab_size]
-        medusa_logits, logits = medusa_infer(input_ids, model, medusa_buffers["medusa_attn_mask"], past_key_values)
+        medusa_logits, logits = medusa_init_then_infer(input_ids, model, medusa_buffers["medusa_attn_mask"], past_key_values)
 
         # tree_indices: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5]
-        # retrieve_indices: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5], 
-        #                   格式为： [base_model.cur_token, head[0], head[1], head[2], head[3]]
+        # retrieve_indices: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5], 
+        #                   格式为： [base_model.cur_token, head[0], head[1], head[2], head[3]] , NOTE:并没有head[4]
         # =>
-        # cartesian_candidates_token_id: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5]
+        # cartesian_candidates_token_id: [path_num=42, head_position_num=base_model.cur_token+head[0~3]=5]
         # tree_candidates_token_id: [batch=1, seq_len=64]
-        cartesian_candidates_token_id, tree_candidates_token_id = generate_candidates(
+        cartesian_candidates_token_id, tree_candidates_token_id = generate_candidates_from_medusa_head(
                 medusa_logits,
                 logits,
                 medusa_buffers["tree_indices"],
@@ -267,7 +269,6 @@ def test_medusa_step():
 
         """
         The `tree_decoding` performs the tree-attention-based inference.
-
         The `evaluate_posterior` performs the verification of the tree.
         """
         # 推理
@@ -281,7 +282,7 @@ def test_medusa_step():
         # NOTE: 此处会进行模型的前向传播
         medusa_logits, logits, outputs = tree_decoding(
                     model,
-                    tree_candidates_token_id,
+                    tree_candidates_token_id, # 只会从tree_candidates_token_id取retrieve_indices中部分的值
                     past_key_values,
                     medusa_buffers["medusa_position_ids"],
                     input_ids,
@@ -304,43 +305,43 @@ def test_medusa_step():
         print('Best candidate path index:', best_candidate.item())
         print('Accept length:', accept_length.item())
     
-    print('Retrieved input @ best candidate path:', tokenizer.batch_decode(cartesian_candidates_token_id[best_candidate.item()]))
-    print('Retrieved output @ best candidate path:', tokenizer.batch_decode(logits.argmax(-1)[best_candidate.item()]))
+        print('Retrieved input @ best candidate path:', tokenizer.batch_decode(cartesian_candidates_token_id[best_candidate.item()]))
+        print('Retrieved output @ best candidate path:', tokenizer.batch_decode(logits.argmax(-1)[best_candidate.item()]))
 
-    print('Retrieved input @ first candidate path:', tokenizer.batch_decode(cartesian_candidates_token_id[0]))
-    print('Retrieved output @ first candidate path:', tokenizer.batch_decode(logits.argmax(-1)[0]))
+        print('Retrieved input @ first candidate path:', tokenizer.batch_decode(cartesian_candidates_token_id[0]))
+        print('Retrieved output @ first candidate path:', tokenizer.batch_decode(logits.argmax(-1)[0]))
 
-    # 更新kv cache缓存
-    # input_ids: [batch=1, seq_len=66]
-    # cartesian_candidates_token_id: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5]
-    # retrieve_indices: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
-    # logits: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
-    # medusa_logits: [medusa_head=5, path_num=42, head_position_num=5, vocab_size]
-    # new_token, best_candidate: int
-    # current_legth_data: [num_hidden_layers * 2]
-    # model.past_key_values_data: [num_hidden_layers * 2, batch_size, head_position_num, input_len=66, head_dim]
-    # => 
-    # input_ids: [batch=1, seq_len=input_len+1=67]
-    # logits: [batch_size=1, last_token=-1, vocab_size]
-    # medusa_logits: [medusa_head=5, batch=1, last_token=-1, vocab_size]
-    input_ids, logits, medusa_logits, new_token = update_inference_inputs(
-                input_ids,
-                cartesian_candidates_token_id,
-                best_candidate,
-                accept_length,
-                medusa_buffers["retrieve_indices"],
-                outputs, # outputs没啥用
-                logits,
-                medusa_logits,
-                new_token,
-                past_key_values_data,
-                current_length_data,
-            )
-    print('Decode:', tokenizer.batch_decode(input_ids[:,input_len:]))
-    print(f'{input_ids.shape=}')
-    print(f'{logits.shape=}')
-    print(f'{medusa_logits.shape=}')
-    print(f'{new_token=}')
+        # 更新kv cache缓存
+        # input_ids: [batch=1, seq_len=66]
+        # cartesian_candidates_token_id: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
+        # retrieve_indices: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
+        # logits: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
+        # medusa_logits: [medusa_head=5, path_num=42, head_position_num=5, vocab_size]
+        # new_token, best_candidate: int
+        # current_legth_data: [num_hidden_layers * 2]
+        # model.past_key_values_data: [num_hidden_layers * 2, batch_size, head_num=8, input_len=66, head_dim=16]
+        # => 
+        # input_ids: [batch=1, seq_len=input_len+1=67]
+        # logits: [batch_size=1, last_token=-1, vocab_size]
+        # medusa_logits: [medusa_head=5, batch=1, last_token=-1, vocab_size]
+        input_ids, logits, medusa_logits, new_token = update_inference_inputs(
+                    input_ids,
+                    cartesian_candidates_token_id,
+                    best_candidate,
+                    accept_length,
+                    medusa_buffers["retrieve_indices"],
+                    outputs, # outputs没啥用
+                    logits,
+                    medusa_logits,
+                    new_token,
+                    past_key_values_data,
+                    current_length_of_each_layer,
+                )
+        print('Decode:', tokenizer.batch_decode(input_ids[:,input_len:]))
+        print(f'{input_ids.shape=}')
+        print(f'{logits.shape=}')
+        print(f'{medusa_logits.shape=}')
+        print(f'{new_token=}')
 
 def test_medusa_all():
     base_model_path = "/home/hkx/data/work/hf_data_and_model/models/MoZhang96/TinyStories-LLaMA2-20M-256h-4l-GQA"
@@ -365,10 +366,10 @@ def test_medusa_all():
     # 每个KVCache.data的shape为 [batch_size, head_num, max_seq_len, head_dim]
     # model.past_key_values_data: [num_hidden_layers * 2, batch_size, head_num, max_seq_len, head_dim]
     # model.current_legth_data: [num_hidden_layers * 2]
-    past_key_values, past_key_values_data, current_length_data = initialize_past_key_values(model.base_model)
+    past_key_values, past_key_values_data, current_length_of_each_layer = initialize_past_key_values(model.base_model)
     model.past_key_values = past_key_values
     model.past_key_values_data = past_key_values_data
-    model.current_length_data = current_length_data
+    model.current_length_of_each_layer = current_length_of_each_layer
     print(f"{model.base_model.config.max_position_embeddings=}") # 2048
     print(f"第0层的key的cache分配的内存张量大小:{past_key_values[0][0].data.shape=}") # (1, 8, 2048, 16)
     print(f"第0层的key的cache实际有效数据的张量大小:{past_key_values[0][0].shape=}") # (1, 8, 0, 16)
@@ -380,7 +381,7 @@ def test_medusa_all():
     print('Input token length:', len(input_ids[0]))
     # 打印第0层的KV cache 中的key, value的shape, shape: [batch_size, head_num, cache_seq_len, head_dim]
     print('Init KV cache shape for attention modules:', model.past_key_values[0][0].shape, model.past_key_values[0][1].shape)
-    print(f'当前各层的缓存长度:{model.current_length_data}  layer_number:{model.current_length_data.shape[0]}')
+    print(f'当前各层的缓存长度:{model.current_length_of_each_layer}  layer_number:{model.current_length_of_each_layer.shape[0]}')
 
     torch.set_printoptions(profile="default", linewidth=200, threshold=1000)
 
@@ -391,36 +392,88 @@ def test_medusa_all():
         input_ids = tokenizer([prompt]).input_ids
         input_len = len(input_ids[0])
         input_ids = torch.as_tensor(input_ids) #.cuda()
-        model.current_length_data.zero_() # this is for rerun
+        model.current_length_of_each_layer.zero_() # this is for rerun
         reset_medusa_mode(model)
         medusa_buffers = generate_medusa_buffers(medusa_choices, device=model.base_model.device)
-        medusa_logits, logits = medusa_infer(input_ids, model, medusa_buffers["medusa_attn_mask"], past_key_values)
+
+        # model.past_key_values: [ [KvCache(key), KvCache(value)], [KvCache(key), KvCache(value)], ...], 有 num_hidden_layers 个 key-value kvcache对象
+        # 每个KVCache.data的shape为 [batch_size, head_position_num, max_seq_len, head_dim]
+        # model.past_key_values_data: [num_hidden_layers * 2, batch_size, head_position_num, input_len=66, head_dim]
+        # medusa_attn_mask: [path_num=64, path_num=64]
+        # => 
+        # medusa_logits: [medusa_head=5, batch_size=1, seq_len=input_len=66, vocab_size]
+        # logits: [batch_size=1, seq_len=input_len=66, vocab_size]
+        medusa_logits, logits = medusa_init_then_infer(input_ids, model, medusa_buffers["medusa_attn_mask"], past_key_values)
+
         cur_length = input_len + 1
         accept_lengths_tree.append(1)
 
         max_new_tokens = 1024 
         for i in range(max_new_tokens):
-            candidates, tree_candidates = generate_candidates(
+            # tree_indices: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5]
+            # retrieve_indices: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5], 
+            #                   格式为： [base_model.cur_token, head[0], head[1], head[2], head[3]] , NOTE:并没有head[4]
+            # =>
+            # cartesian_candidates_token_id: [path_num=42, head_position_num=base_model.cur_token+head[0~3]=5]
+            # tree_candidates_token_id: [batch=1, seq_len=64]
+            cartesian_candidates_token_id, tree_candidates_token_id = generate_candidates_from_medusa_head(
                     medusa_logits,
                     logits,
                     medusa_buffers["tree_indices"],
                     medusa_buffers["retrieve_indices"],
-                )
+            )
+
+            """
+            The `tree_decoding` performs the tree-attention-based inference.
+            The `evaluate_posterior` performs the verification of the tree.
+            """
+            # 推理
+            # tree_candidates_token_id: [batch=1, seq_len=64]
+            # medusa_position_ids: [seq_len=all_path_num=64]
+            # retrieve_indices: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
+            # input_ids: [batch=1, seq_len=66]
+            # =>
+            # medusa_logits: [medusa_head=5, path_num=42, head_position_num=5, vocab_size]
+            # logits: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
             # NOTE: 此处会进行模型的前向传播
             medusa_logits, logits, outputs = tree_decoding(
                     model,
-                    tree_candidates,
+                    tree_candidates_token_id,
                     past_key_values,
                     medusa_buffers["medusa_position_ids"],
                     input_ids,
                     medusa_buffers["retrieve_indices"],
                 )
+            # 验证
+            # logits: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
+            # cartesian_candidates_token_id: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
+            # =>
+            # best_candidate: int
+            # accept_length: int
             best_candidate, accept_length = evaluate_posterior(
-                    logits, candidates, temperature = 0, posterior_threshold = 0, posterior_alpha = 0
+                    logits, 
+                    cartesian_candidates_token_id, 
+                    temperature = 0, 
+                    posterior_threshold = 0, 
+                    posterior_alpha = 0
                 )
+
+            # 更新kv cache缓存
+            # input_ids: [batch=1, seq_len=66]
+            # cartesian_candidates_token_id: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
+            # retrieve_indices: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
+            # logits: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
+            # medusa_logits: [medusa_head=5, path_num=42, head_position_num=5, vocab_size]
+            # new_token, best_candidate: int
+            # current_legth_data: [num_hidden_layers * 2]
+            # model.past_key_values_data: [num_hidden_layers * 2, batch_size, head_num=8, input_len=66, head_dim=16]
+            # => 
+            # input_ids: [batch=1, seq_len=input_len+1=67]
+            # logits: [batch_size=1, last_token=-1, vocab_size]
+            # medusa_logits: [medusa_head=5, batch=1, last_token=-1, vocab_size]
             input_ids, logits, medusa_logits, new_token = update_inference_inputs(
                     input_ids,
-                    candidates,
+                    cartesian_candidates_token_id,
                     best_candidate,
                     accept_length,
                     medusa_buffers["retrieve_indices"],
@@ -429,20 +482,23 @@ def test_medusa_all():
                     medusa_logits,
                     new_token,
                     past_key_values_data,
-                    current_length_data,
+                    current_length_of_each_layer,
                 )
             
             accept_length_tree = input_ids.shape[1] - cur_length
             cur_length = accept_length_tree + cur_length
             accept_lengths_tree.append(accept_length_tree)
+            print(f"kv cache seq len:{model.current_length_of_each_layer[0].item()}")
 
             if model.tokenizer.eos_token_id in input_ids[0, input_len:]:
                 break
 
         print('Decode:', tokenizer.batch_decode(input_ids[:,input_len:]))
+        print(f'{accept_lengths_tree=}')
+        print(f'{accept_lengths_tree.shape=}')
 
 
 if __name__ == "__main__":
     #pred_step()
-    test_medusa_step()
-    #test_medusa_all()
+    #test_medusa_step()
+    test_medusa_all()

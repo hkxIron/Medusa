@@ -296,14 +296,14 @@ class MedusaModel(nn.Module):
         if hasattr(self, "past_key_values"):
             past_key_values = self.past_key_values
             past_key_values_data = self.past_key_values_data
-            current_length_data = self.current_length_data
+            current_length_of_each_layer = self.current_length_of_each_layer
             # Reset the past key and value states
-            current_length_data.zero_()
+            current_length_of_each_layer.zero_()
         else:
             (
                 past_key_values,
                 past_key_values_data,
-                current_length_data,
+                current_length_of_each_layer,
             ) = initialize_past_key_values(self.base_model)
             # past_key_values: [ [KvCache(key), KvCache(value)], [KvCache(key), KvCache(value)], ...], 有 num_hidden_layers 个 key-value kvcache对象
             # 每个KVCache.data的shape为 [batch_size, head_num, max_seq_len, head_dim]
@@ -312,14 +312,14 @@ class MedusaModel(nn.Module):
             self.past_key_values = past_key_values
             self.past_key_values_data = past_key_values_data
             # current_legth_data: [num_hidden_layers * 2], 奇数和偶数分别对应key和value的长度, 这两个长度一般是相同的
-            self.current_length_data = current_length_data
+            self.current_length_of_each_layer = current_length_of_each_layer
 
         input_len = input_ids.shape[1]
 
         reset_medusa_mode(self)
         # Initialize tree attention mask and process prefill tokens
         # 1. 生成原始模型推理的logits，以及medusa的logits
-        medusa_logits, logits = medusa_infer(
+        medusa_logits, logits = medusa_init_then_infer(
             input_ids, self, medusa_buffers["medusa_attn_mask"], past_key_values
         )
 
@@ -329,7 +329,7 @@ class MedusaModel(nn.Module):
         for idx in range(max_steps): # 最大生成max_steps个token
             # 2. 生成各medusa头的候选集
             # Generate candidates with topk predictions from Medusa heads
-            candidates, tree_candidates = generate_candidates(
+            candidates, tree_candidates = generate_candidates_from_medusa_head(
                 medusa_logits,
                 logits,
                 medusa_buffers["tree_indices"],
@@ -371,7 +371,7 @@ class MedusaModel(nn.Module):
                 medusa_logits,
                 new_token,
                 past_key_values_data,
-                current_length_data,
+                current_length_of_each_layer,
             )
 
             yield {

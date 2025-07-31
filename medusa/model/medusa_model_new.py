@@ -364,7 +364,7 @@ class MedusaLlamaModel(KVLlamaForCausalLM):
 
         reset_medusa_mode(self)
         # Initialize tree attention mask and process prefill tokens
-        medusa_logits, logits = medusa_infer(
+        medusa_logits, logits = medusa_init_then_infer(
             input_ids, self, medusa_buffers["medusa_attn_mask"], past_key_values
         )
 
@@ -373,7 +373,7 @@ class MedusaLlamaModel(KVLlamaForCausalLM):
 
         for idx in range(max_steps):
             # Generate candidates with topk predictions from Medusa heads
-            candidates, tree_candidates = generate_candidates(
+            candidates, tree_candidates = generate_candidates_from_medusa_head(
                 medusa_logits,
                 logits,
                 medusa_buffers["tree_indices"],

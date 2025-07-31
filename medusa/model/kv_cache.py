@@ -141,7 +141,7 @@ def initialize_past_key_values(model:PreTrainedModel):
     # Initialize tensor to store the current length of the cached data for all layers.
     # [IMPORTANT] It needs to be kept on CPU for quick access and updates.
     # current_legth_data: [num_hidden_layers * 2], 奇数和偶数分别对应key和value的长度, 这两个长度一般是相同的
-    current_length_data = torch.zeros( config.num_hidden_layers * 2, dtype=torch.long, device="cpu") # 每层的kv的有效长度需要存在CPU上，因为需要快速访问和更新
+    current_length_of_each_layer = torch.zeros( config.num_hidden_layers * 2, dtype=torch.long, device="cpu") # 每层的kv的有效长度需要存在CPU上，因为需要快速访问和更新
 
     # Creating a KVCache for each pair of key and value in all layers
     past_key_values_objects = [] * config.num_hidden_layers
@@ -151,7 +151,7 @@ def initialize_past_key_values(model:PreTrainedModel):
                 # j=0: key, j=1: value, 即偶数为key, 奇数为value
                 # 注意：每个KVCache.data的shape为 [batch_size, head_num, max_seq_len, head_dim]
                 KVCache(data=past_key_values_data[layer_idx * 2 + j], 
-                        current_length=current_length_data[layer_idx * 2 + j]) for j in range(2)
+                        current_length=current_length_of_each_layer[layer_idx * 2 + j]) for j in range(2)
             ]
         )
     # past_key_values_objects: [ [KvCache(key), KvCache(value)], [KvCache(key), KvCache(value)], ...], 有 num_hidden_layers 个 key-value kvcache对象
@@ -159,4 +159,4 @@ def initialize_past_key_values(model:PreTrainedModel):
     # past_key_values_data: [num_hidden_layers * 2, batch_size, head_num, max_seq_len, head_dim]
     # 注意：past_key_values_objects和past_key_values_data是两个不同的对象，但它们共享相同的GPU内存空间
     # current_legth_data: [num_hidden_layers * 2]
-    return past_key_values_objects, past_key_values_data, current_length_data
+    return past_key_values_objects, past_key_values_data, current_length_of_each_layer

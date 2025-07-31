@@ -24,7 +24,7 @@ from medusa.model.medusa_model import MedusaModel
 from medusa.model.kv_cache import initialize_past_key_values
 from medusa.model.medusa_choices import *
 
-def medusa_infer(input_ids, model, tokenizer, medusa_choices, temperature, posterior_threshold, posterior_alpha, top_p=0.8, sampling = 'typical', fast = True, max_steps = 512):
+def medusa_init_then_infer(input_ids, model, tokenizer, medusa_choices, temperature, posterior_threshold, posterior_alpha, top_p=0.8, sampling = 'typical', fast = True, max_steps = 512):
     assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
     # Avoid modifying the input_ids in-place
     input_ids = input_ids.clone()
@@ -60,13 +60,13 @@ def medusa_infer(input_ids, model, tokenizer, medusa_choices, temperature, poste
 
     input_len = input_ids.shape[1]
     reset_medusa_mode(model)
-    medusa_logits, logits = medusa_infer(
+    medusa_logits, logits = medusa_init_then_infer(
             input_ids, model, medusa_buffers["medusa_attn_mask"], past_key_values
     )
     new_token = 0
     
     for idx in range(max_steps): 
-        candidates, tree_candidates = generate_candidates(
+        candidates, tree_candidates = generate_candidates_from_medusa_head(
                 medusa_logits,
                 logits,
                 medusa_buffers["tree_indices"],
@@ -236,7 +236,7 @@ def get_model_answers(
             try:
                 torch.cuda.synchronize()
                 start_time = time.time()
-                output_ids, new_token, idx = medusa_infer(
+                output_ids, new_token, idx = medusa_init_then_infer(
                     torch.as_tensor(input_ids).cuda(),
                     model,
                     tokenizer,
@@ -320,7 +320,7 @@ def get_model_answers(
                 try:
                     torch.cuda.synchronize()
                     start_time = time.time()
-                    output_ids, new_token, idx = medusa_infer(
+                    output_ids, new_token, idx = medusa_init_then_infer(
                         torch.as_tensor(input_ids).cuda(),
                         model,
                         tokenizer,
