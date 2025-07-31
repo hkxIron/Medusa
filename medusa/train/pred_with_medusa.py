@@ -270,6 +270,7 @@ def test_medusa():
         # tree_candidates_token_id: [batch=1, seq_len=64]
         # medusa_position_ids: [seq_len=all_path_num=64]
         # retrieve_indices: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
+        # input_ids: [batch=1, seq_len=66]
         # =>
         # medusa_logits: [medusa_head=5, path_num=42, head_position_num=5, vocab_size]
         # logits: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
@@ -284,6 +285,7 @@ def test_medusa():
         # 验证
         # logits: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
         # cartesian_candidates_token_id: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
+        # =>
         # best_candidate: int
         # accept_length: int
         best_candidate, accept_length = evaluate_posterior(logits, 
@@ -297,20 +299,32 @@ def test_medusa():
         print('Best candidate path index:', best_candidate.item())
         print('Accept length:', accept_length.item())
     
-    print('Retrieved input @ best candidate:', tokenizer.batch_decode(cartesian_candidates_token_id[best_candidate.item()]))
-    print('Retrieved output @ best candidate:', tokenizer.batch_decode(logits.argmax(-1)[best_candidate.item()]))
+    print('Retrieved input @ best candidate path:', tokenizer.batch_decode(cartesian_candidates_token_id[best_candidate.item()]))
+    print('Retrieved output @ best candidate path:', tokenizer.batch_decode(logits.argmax(-1)[best_candidate.item()]))
 
-    print('Retrieved input @ another candidate:', tokenizer.batch_decode(cartesian_candidates_token_id[0]))
-    print('Retrieved output @ another candidate:', tokenizer.batch_decode(logits.argmax(-1)[0]))
+    print('Retrieved input @ first candidate path:', tokenizer.batch_decode(cartesian_candidates_token_id[0]))
+    print('Retrieved output @ first candidate path:', tokenizer.batch_decode(logits.argmax(-1)[0]))
 
     # 更新kv cache缓存
+    # input_ids: [batch=1, seq_len=66]
+    # cartesian_candidates_token_id: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5]
+    # retrieve_indices: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
+    # logits: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
+    # medusa_logits: [medusa_head=5, path_num=42, head_position_num=5, vocab_size]
+    # new_token, best_candidate: int
+    # current_legth_data: [num_hidden_layers * 2]
+    # model.past_key_values_data: [num_hidden_layers * 2, batch_size, head_position_num, input_len=66, head_dim]
+    # => 
+    # input_ids: [batch=1, seq_len=input_len+1=67]
+    # logits: [batch_size=1, last_token=-1, vocab_size]
+    # medusa_logits: [medusa_head=5, batch=1, last_token=-1, vocab_size]
     input_ids, logits, medusa_logits, new_token = update_inference_inputs(
                 input_ids,
                 cartesian_candidates_token_id,
                 best_candidate,
                 accept_length,
                 medusa_buffers["retrieve_indices"],
-                outputs,
+                outputs, # outputs没啥用
                 logits,
                 medusa_logits,
                 new_token,
@@ -318,6 +332,10 @@ def test_medusa():
                 current_length_data,
             )
     print('Decode:', tokenizer.batch_decode(input_ids[:,input_len:]))
+    print(f'{input_ids.shape=}')
+    print(f'{logits.shape=}')
+    print(f'{medusa_logits.shape=}')
+    print(f'{new_token=}')
 
 if __name__ == "__main__":
     #pred_step()

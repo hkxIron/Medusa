@@ -669,7 +669,7 @@ def get_typical_posterior_mask(logits, candidates, temperature, posterior_thresh
     
 
 def evaluate_posterior(
-    logits, candidate_token_ids, temperature, posterior_threshold=0.3, posterior_alpha = 0.09, top_p=0.8, sampling = 'typical', fast = True
+    logits, medusa_candidate_token_ids, temperature, posterior_threshold=0.3, posterior_alpha = 0.09, top_p=0.8, sampling = 'typical', fast = True
 ):
     """
     Evaluate the posterior probabilities of the candidates based on the provided logits and choose the best candidate.
@@ -694,19 +694,20 @@ def evaluate_posterior(
     if temperature == 0:
         # Find the tokens that match the maximum logits for each position in the sequence
         # logits: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
-        # candidates_token_id: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
+        # medusa_candidates_token_id: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
+        # =>
         # posterior_mask: [path_num=42, 4]
-        posterior_mask = (candidate_token_ids[:, 1:] == torch.argmax(logits[:, :-1], dim=-1)).int()
+        posterior_mask = (medusa_candidate_token_ids[:, 1:] == torch.argmax(logits[:, :-1], dim=-1)).int()
         # 求接受的token个数
-        # candidates_accept_length:[seq_len=42]
+        # candidates_accept_length:[seq_len=42], 只要连续接受的token
         candidates_accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
         accept_length = candidates_accept_length.max()
         # Choose the best candidate
         if accept_length == 0:
             # Default to the first candidate if none are accepted
-            best_candidate_idx = torch.tensor(0, dtype=torch.long, device=candidate_token_ids.device)
+            best_candidate_idx = torch.tensor(0, dtype=torch.long, device=medusa_candidate_token_ids.device)
         else:
-            # 选择接受最多的candidate所在的index, 即接受最长的candidate所在的index
+            # 取出接受最长的candidate所在的index
             best_candidate_idx = torch.argmax(candidates_accept_length).to(torch.long)
         return best_candidate_idx, accept_length
         
@@ -714,7 +715,7 @@ def evaluate_posterior(
         if fast:
             posterior_prob = torch.softmax(logits[:, :-1] / temperature, dim=-1)
             candidates_prob = torch.gather(
-                posterior_prob, dim=-1, index=candidate_token_ids[:, 1:].unsqueeze(-1)
+                posterior_prob, dim=-1, index=medusa_candidate_token_ids[:, 1:].unsqueeze(-1)
             ).squeeze(-1)
             posterior_entropy = -torch.sum(
                 posterior_prob * torch.log(posterior_prob + 1e-5), dim=-1
@@ -730,7 +731,7 @@ def evaluate_posterior(
             accept_length = candidates_accept_length.max()
             if accept_length == 0:
                 # If no candidates are accepted, just choose the first one
-                best_candidate_idx = torch.tensor(0, dtype=torch.long, device=candidate_token_ids.device)
+                best_candidate_idx = torch.tensor(0, dtype=torch.long, device=medusa_candidate_token_ids.device)
             else:
                 best_candidates = torch.where(candidates_accept_length == accept_length)[0]
                 # Accept the best one according to likelihood
@@ -740,14 +741,14 @@ def evaluate_posterior(
                 best_candidate_idx = best_candidates[torch.argmax(likelihood)]
             return best_candidate_idx, accept_length
         # Calculate posterior probabilities and thresholds for candidate selection
-        posterior_mask = get_typical_posterior_mask(logits, candidate_token_ids, temperature, posterior_threshold, posterior_alpha, fast)
+        posterior_mask = get_typical_posterior_mask(logits, medusa_candidate_token_ids, temperature, posterior_threshold, posterior_alpha, fast)
         candidates_accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
         # Choose the best candidate based on the evaluated posterior probabilities
         accept_length = candidates_accept_length.max()
         
         if accept_length == 0:
             # If no candidates are accepted, just choose the first one
-            best_candidate_idx = torch.tensor(0, dtype=torch.long, device=candidate_token_ids.device)
+            best_candidate_idx = torch.tensor(0, dtype=torch.long, device=medusa_candidate_token_ids.device)
         else:
             best_candidate_idx = torch.argmax(candidates_accept_length).to(torch.long)
             # Accept the best one according to likelihood
@@ -755,13 +756,13 @@ def evaluate_posterior(
     
     if sampling == 'nucleus':
         assert top_p < 1.0 + 1e-6, "top_p should between 0 and 1"
-        posterior_mask = get_nucleus_posterior_mask(logits, candidate_token_ids, temperature, top_p)
+        posterior_mask = get_nucleus_posterior_mask(logits, medusa_candidate_token_ids, temperature, top_p)
         candidates_accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
         accept_length = candidates_accept_length.max()
         # Choose the best candidate
         if accept_length == 0:
             # Default to the first candidate if none are accepted
-            best_candidate_idx = torch.tensor(0, dtype=torch.long, device=candidate_token_ids.device)
+            best_candidate_idx = torch.tensor(0, dtype=torch.long, device=medusa_candidate_token_ids.device)
         else:
             best_candidate_idx = torch.argmax(candidates_accept_length).to(torch.long)
         return best_candidate_idx, accept_length
@@ -801,32 +802,58 @@ def update_inference_inputs(
     - medusa_logits (torch.Tensor): Updated medusa logits.
     - new_token (int): Updated counter for the new tokens added.
     """
+    # input_ids: [batch=1, seq_len=66]
+    # candidates=cartesian_candidates_token_id: [seq_len=42, head_position_num=base_model.cur_token+head[0...4]=5]
+    # retrieve_indices: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
+    # logits: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
+    # medusa_logits: [medusa_head=5, path_num=42, head_position_num=5, vocab_size]
+    # new_token, best_candidate: int
+    # current_legth_data: [num_hidden_layers * 2]
+    # model.past_key_values_data: [num_hidden_layers * 2, batch_size, head_position_num, input_len=66, head_dim]
     # Calculate the starting position for new tokens based on the previous input length
+
     prev_input_len = input_ids.shape[1]
     # Map the best candidate indices to the original indices in the sequence
-    select_indices = (
-        retrieve_indices[best_candidate, : accept_length + 1] + prev_input_len
-    )
+    # retrieve_indices: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
+    # select_indices: [accept_length+1]
+    # 注意：accept_length: 至少为1,因为base_model.cur_token肯定是接受的
+    select_indices = (retrieve_indices[best_candidate, : accept_length + 1] + prev_input_len)
+
     # Append the tokens from the best candidate to the input sequence
+    # input_ids: [batch=1, seq_len=66]
+    # =>
+    # input_ids: [batch=1, seq_len=66+1=67]
     input_ids = torch.cat(
+        # None: 在第0维加1个维度
         [input_ids, candidates[None, best_candidate, : accept_length + 1]], dim=-1
     )
+
     # Update the past key values based on the selected tokens
     # Source tensor that contains relevant past information based on the selected candidate
-    tgt = past_key_values_data[..., select_indices, :]
+    # past_key_values_data: [num_hidden_layers * 2, batch_size, head_position_num, input_len=66, head_dim]
+    # select_indices: [accept_length+1]
+    # src: [num_hidden_layers * 2, batch_size, head_position_num, accept_length+1, head_dim]
+    src = past_key_values_data[..., select_indices, :]
+
     # Destination tensor where the relevant past information will be stored
-    dst = past_key_values_data[..., prev_input_len : prev_input_len + tgt.shape[-2], :]
+    dst = past_key_values_data[..., prev_input_len : prev_input_len + src.shape[-2], :]
+
     # Copy relevant past information from the source to the destination
-    dst.copy_(tgt, non_blocking=True)
+    # 将src的值复制到dst中
+    dst.copy_(src, non_blocking=True)
 
     # Update the current length tensor (currently only support batch size is 1)
-    current_length_data.fill_(prev_input_len + tgt.shape[-2])
+    current_length_data.fill_(prev_input_len + src.shape[-2])
 
     # Extract logits and medusa logits for the accepted tokens
+    # logits: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
+    # medusa_logits: [medusa_head=5, path_num=42, head_position_num=5, vocab_size]
+    # =>
+    # logits: [batch=1, last_token=-1, vocab_size]
+    # medusa_logits: [medusa_head=5, batch=1, last_token=-1, vocab_size]
     logits = logits[None, best_candidate, accept_length : accept_length + 1]
-    medusa_logits = medusa_logits[
-        :, None, best_candidate, accept_length : accept_length + 1
-    ]
+    medusa_logits = medusa_logits[:, None, best_candidate, accept_length : accept_length + 1 ]
+
     # Update the new token counter
     new_token += accept_length + 1
 

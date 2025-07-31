@@ -10,6 +10,19 @@
     "version": "0.2.0",
     "configurations": [
           {
+              "name": "调试当前py文件",
+              "type": "debugpy",
+              "request": "launch",
+              "program": "${file}", 
+              "console": "integratedTerminal",
+              "justMyCode": false,
+              "args": [ ],
+              "cwd": "${fileDirname}",  // 使用当前文件所在目录作为工作目录
+              "env": {
+                  "PYTHONPATH": "${workspaceFolder}"  // 添加当前工程目录
+              }
+          },
+          {
             "name": "Medusa调试",
             "type": "debugpy",
             "request": "launch",
@@ -70,19 +83,6 @@
                 "--clip_model_for_debug", "True",
                 "--use_my_batch_padding_collator", "True",
             ],
-            "cwd": "${fileDirname}",  // 使用当前文件所在目录作为工作目录
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}"  // 添加当前工程目录
-            }
-        },
-        {
-            "name": "调试当前py文件",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${file}", 
-            "console": "integratedTerminal",
-            "justMyCode": false,
-            "args": [ ],
             "cwd": "${fileDirname}",  // 使用当前文件所在目录作为工作目录
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"  // 添加当前工程目录
