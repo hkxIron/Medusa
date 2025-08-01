@@ -199,6 +199,9 @@ class MedusaModel(nn.Module):
                 **kwargs,
             )
 
+        # medusa模型每次前向时均会把kv cache传过来
+        # past_key_values: [ [KvCache(key), KvCache(value)], [KvCache(key), KvCache(value)], ...], 有 num_hidden_layers 个 key-value kvcache对象
+        # 每个KVCache.data的shape为 [batch_size, head_position_num, max_seq_len, head_dim]
         with torch.inference_mode(): # 对于base model的forward，不需要计算梯度
             # Pass input through the base model
             # base_model.model仅有decoder,但并不包含lm_head
@@ -329,7 +332,7 @@ class MedusaModel(nn.Module):
         for idx in range(max_steps): # 最大生成max_steps个token
             # 2. 生成各medusa头的候选集
             # Generate candidates with topk predictions from Medusa heads
-            candidates, tree_candidates = generate_candidates_from_medusa_head(
+            candidates, tree_candidates = generate_candidates(
                 medusa_logits,
                 logits,
                 medusa_buffers["tree_indices"],

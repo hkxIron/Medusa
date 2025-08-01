@@ -178,7 +178,7 @@ class CustomizedTrainer(Trainer):
 
 
         # logits:[medusa_head, batch, seq_len, vocab_size]
-        logits = model.forward(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], medusa_forward=True)
+        medusa_logits = model.forward(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], medusa_forward=True)
         # labels:[batch, seq_len]
         #print(f"{inputs.keys()=}, {inputs}")
         labels = inputs["labels"]
@@ -196,9 +196,10 @@ class CustomizedTrainer(Trainer):
             shift_labels = labels[..., 1:].contiguous()
             """
             #print(f"{logits.shape=}")
-            medusa_logits = logits[i, :, : -(2 + i)].contiguous() # 取出第i个Medusa头的logits, 预测的是next next token, 即向左移2位
+            # NOTE:左移1位是next token,左移2位是next next token
+            medusa_logits = medusa_logits[i, :, : -(2 + i)].contiguous() # 取出第i个Medusa头的logits, 预测的是next next token, 即向左移2位
             medusa_labels = labels[..., 2 + i :].contiguous()
-            medusa_logits = medusa_logits.view(-1, logits.shape[-1]) # [batch_size * (seq_len - 2), vocab_size]
+            medusa_logits = medusa_logits.view(-1, medusa_logits.shape[-1]) # [batch_size * (seq_len - 2), vocab_size]
             medusa_labels = medusa_labels.view(-1) # [batch_size * (seq_len - 2)]
             medusa_labels = medusa_labels.to(medusa_logits.device)
             loss_i = loss_fct(medusa_logits, medusa_labels)
@@ -225,7 +226,7 @@ class CustomizedTrainer(Trainer):
 
         #self.step +=1
 
-        return (loss, logits) if return_outputs else loss # hf Trainer框架要求返回标量
+        return (loss, medusa_logits) if return_outputs else loss # hf Trainer框架要求返回标量
 
 
 @dataclass

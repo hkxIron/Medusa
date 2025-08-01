@@ -256,10 +256,13 @@ class LlamaAttention(nn.Module):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
-        self.num_heads = config.num_attention_heads
-        self.head_dim = self.hidden_size // self.num_heads
-        self.num_key_value_heads = config.num_key_value_heads
-        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        self.num_heads = config.num_attention_heads # 多少个头
+        self.head_dim = self.hidden_size // self.num_heads # 每个head的维度
+        # num_key_value_heads=1时，为multi query attention(MQA), 即所有query共享一个key
+        # num_key_value_heads=num_attention_heads时，为原始的multi head attention(MHA)
+        # num_key_value_heads<num_attention_heads时，为group query attention(GQA), 每个group大小为num_key_value_group_size
+        self.num_key_value_heads = config.num_key_value_heads # 有多少个key_value head,即多少个key-value group
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads # 
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_theta = config.rope_theta
 
@@ -334,6 +337,9 @@ class LlamaAttention(nn.Module):
             value_states = torch.cat(value_states, dim=-1)
 
         else:
+            # hidden_states: [batch, seq_len, hidden_dim]
+            # query_states: [batch, seq_len, hidden_dim]
+            # key_states: [batch, seq_len, hidden_dim]
             query_states = self.q_proj(hidden_states)
             key_states = self.k_proj(hidden_states)
             value_states = self.v_proj(hidden_states)
@@ -344,6 +350,7 @@ class LlamaAttention(nn.Module):
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
+            # past_key_value: [KvCache(key), KvCache(value)]
             kv_seq_len += past_key_value[0].shape[-2]
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
@@ -355,6 +362,10 @@ class LlamaAttention(nn.Module):
         # past_key_value: [KvCache(key), KvCache(value)], 当前layer的 kvcache对象
         # 每个KVCache.data的shape为 [batch_size, head_num, max_seq_len, head_dim]
         if past_key_value is not None:
+            # key_states: [batch, head_num, seq_len=1, head_dim]
+            # past_key_value.key: [batch_size, head_num, seq_len=past_key_len, head_dim]
+            # key_states; [batch, head_num, seq_len=1+past_key_len, head_dim]
+            # NOTE: 见kv_cache.py中的cat函数，将会原地修改past_key_value的内存与数据，所以不会丢失修改,也不用return
             key_states = past_key_value[0].cat(key_states, dim=2)
             value_states = past_key_value[1].cat(value_states, dim=2)
 
@@ -588,10 +599,10 @@ class LlamaDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = (
+        self.self_attn: LlamaAttention = (
             LlamaAttention(config=config)
-            if not getattr(config, "_flash_attn_2_enabled", False)
-            else LlamaFlashAttention2(config=config)
+            # if not getattr(config, "_flash_attn_2_enabled", False)
+            # else LlamaFlashAttention2(config=config)
         )
         self.mlp = LlamaMLP(config)
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -625,8 +636,10 @@ class LlamaDecoderLayer(nn.Module):
 
         hidden_states = self.input_layernorm(hidden_states)
 
+        # past_key_value: [KvCache(key), KvCache(value)]
+        # 注意：kv cache也只对self attention生效
         # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        hidden_states, self_attn_weights, present_key_value = self.self_attn.forward(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -836,13 +849,14 @@ class LlamaModel(LlamaPreTrainedModel):
         ... 
         """
         if hasattr(self, "medusa_mask") and self.medusa_mask is not None:
-            # meduas_mask: [batch=1,1, path_num=64, path_num=64]
+            # meduas_mask: [batch=1, head_num=1, path_num=64, path_num=64]
             medusa_mask = self.medusa_mask
             medusa_len = medusa_mask.size(-1)
-            # combined_attention_mask: [bsz, 1, tgt_seq_len, src_seq_len]
+            # combined_attention_mask: [bsz, 1, tgt_seq_len, src_seq_len], 将最后验证的path中为0的部分为mask为最小值
             combined_attention_mask[:, :, -medusa_len:, -medusa_len:][
                 medusa_mask == 0
             ] = combined_attention_mask.min()
+
             if hasattr(self, "medusa_mode"):
                 # debug mode
                 if self.medusa_mode == "debug":
@@ -932,11 +946,16 @@ class LlamaModel(LlamaPreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = () if use_cache else None
 
-        for idx, decoder_layer in enumerate(self.layers):
+        for layer_idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            past_key_value = past_key_values[idx] if past_key_values is not None else None
+            # medusa模型每次前向时均会把kv cache传过来
+            # past_key_values: [ [KvCache(key), KvCache(value)], [KvCache(key), KvCache(value)], ...], 有 num_hidden_layers 个 key-value kvcache对象
+            # 每个KVCache.data的shape为 [batch_size, head_position_num, max_seq_len, head_dim]
+            # 取出每层的kv cache
+            # past_key_value: [KvCache(key), KvCache(value)]
+            past_key_value = past_key_values[layer_idx] if past_key_values is not None else None
 
             if self.gradient_checkpointing and self.training:
 
@@ -991,7 +1010,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = LlamaModel(config)
+        self.model:LlamaModel = LlamaModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
@@ -1064,6 +1083,11 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+
+        # medusa模型每次前向时均会把kv cache传过来
+        # past_key_values: [ [KvCache(key), KvCache(value)], [KvCache(key), KvCache(value)], ...], 有 num_hidden_layers 个 key-value kvcache对象
+        # 每个KVCache.data的shape为 [batch_size, head_position_num, max_seq_len, head_dim]
+
         outputs = self.model.forward(
             input_ids=input_ids,
             attention_mask=attention_mask,

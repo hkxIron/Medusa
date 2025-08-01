@@ -95,8 +95,8 @@ class KVCache:
         Returns:
             torch.Tensor: The data tensor after concatenation up to the current length.
         """
-        # 返回一个视图切片
-        dst = self.data.narrow(dim, self.current_length, tensor.shape[dim])
+        # 将self.data返回一个视图切片dst
+        dst = self.data.narrow(dim, start=self.current_length, length=tensor.shape[dim])
         # 将 tensor 的数据复制到 dst 的内存位置
         dst.copy_(tensor)
         # 更新 current_length 为当前长度加上 tensor 的长度
