@@ -625,8 +625,8 @@ index, token
 
 
 
-1. candidates_token_id, 即原始medusa各heados的token输出
-index, token
+1. medusa_candidates_token_id, 即原始medusa各heados的token输出
+index, medusa_candidates_token_id
 0, base_model.cur_token
 1, head[0].token[0]
 2, head[0].token[1]
@@ -685,27 +685,35 @@ index, token
 
 
 2. tree_indices即 medusa_last_attn_token_indices: 
-共64个attention tree, 这里的tree_indices，其实就是每个tree中参与attention的最后一个token的索引
+共64个attention tree, 
+这里的tree_indices，其实就是每个tree中参与attention的最后一个token的索引
 
-其中的indice是相对于1+50个medusa候选token而言的
+medusa_last_attn_token_indices 里存的indice是相对于1+50个medusa候选token而言的
 1： base_model.cur_token
 50: 5个medusa头，每个头产生10个候选token
 
-[0, # base_model.cur_token
+[
+0, # base_model.cur_token
+
+# 1阶attention个数10个
 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, # head[0].token[0~9]
 
+# 2阶attention个数28个
 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 
 11, 12, 13, 14, 15, 16, 17, 11, 12, 13, 
 11, 12, 
 11, 11, 11, 11, 11, 11, 
 
+# 3阶attention个数23个
 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 
 21, 22, 23, 21, 22, 
 21, 21, 21, 21, 21, 
 21, 22, 
 21, 
 
-31, 32]
+# 4阶attention个数：2
+31, 32
+]
 
 去重后的indices与参与attention的候选token如下：
 
@@ -718,13 +726,13 @@ index, token
 但注意：并不是任意两个token组合均会被验证
 
 
-3. tree_candidates_token_id = candidates_token_id[medusa_last_attn_token_indices] 
-   tree_candidates_token_id_ext = torch.cat([tree_candidates_token_id, torch.zeros((1))], dim=0) # 末尾补0
+3. tree_candidates_last_token_id = medusa_candidates_token_id[medusa_last_attn_token_indices] 
+   tree_candidates_last_token_id_ext = torch.cat([tree_candidates_last_token_id, torch.zeros((1))], dim=0) # 末尾补0
 
-从candidates_token_id 只取 medusa_last_attn_token_indices的位置的token
+从 medusa_candidates_token_id 只取 medusa_last_attn_token_indices的位置的token
 
-tree_candidates_token_id_ext:
-index	token	old_index	position_id
+tree_candidates_last_token_id_ext:
+index	token=medusa_candidates_token_id[medusa_last_attn_token_indices]	medusa_last_attn_token_indices	position_id
 0	 base_model.token	0	0
 1	 head[0].token[0]	1	1
 2	 head[0].token[1]	2	1
@@ -736,6 +744,7 @@ index	token	old_index	position_id
 8	 head[0].token[7]	8	1
 9	 head[0].token[8]	9	1
 10	 head[0].token[9]	10	1
+
 11	 head[1].token[0]	11	2
 12	 head[1].token[1]	12	2
 13	 head[1].token[2]	13	2
@@ -764,6 +773,7 @@ index	token	old_index	position_id
 36	 head[1].token[0]	11	2
 37	 head[1].token[0]	11	2
 38	 head[1].token[0]	11	2
+
 39	 head[2].token[0]	21	3
 40	 head[2].token[1]	22	3
 41	 head[2].token[2]	23	3
@@ -787,9 +797,10 @@ index	token	old_index	position_id
 59	 head[2].token[0]	21	3
 60	 head[2].token[1]	22	3
 61	 head[2].token[0]	21	3
+
 62	 head[3].token[0]	31	4
 63	 head[3].token[1]	32	4
-64  0   -1 -1 # 最后补了一个0, tree_candidates_token_id没有此行
+64  0   -1 -1 # 最后补了一个0, tree_candidates_last_token_id没有此行
 
 
 4. retrieve_indices = retrieve_token_indices: 从attention_mask的最后一行开始, 共42行, 5列
@@ -804,6 +815,7 @@ shape=[42, 5]
 格式为：
 [base_model.cur_token, head[0], head[1], head[2], head[3]]
 
+路径, 参与attention的所有token
 [[0, 1, 11, 39, 63], base_model.cur_token + head[0].token[0]+head[1].token[0] + head[2].token[0] + head[3].token[1]
  [0, 1, 11, 39, 62], base_model.cur_token + head[0].token[0]+head[1].token[0] + head[2].token[0] + head[3].token[0]
  [0, 3, 28, 61, -1], base_model.cur_token + head[0].token[2]+head[1].token[0] + head[2].token[0]
@@ -847,15 +859,14 @@ shape=[42, 5]
  [0, 1, 20, -1, -1], base_model.cur_token + head[0].token[0]+head[1].token[9]
  [0, 1, 19, -1, -1]] base_model.cur_token + head[0].token[0]+head[1].token[8]
 
-5. cartesian_candidates_token_id, 从 tree_candidates_token_id_ext 按去重后的retrieve_token_indices 位置取所有attention的token
-cartesian_candidates_token_id = tree_candidates_token_id_ext[retrieve_token_indices]
+5. cartesian_candidates_token_id, 从 tree_candidates_last_token_id_ext 按去重后的retrieve_token_indices 位置取所有attention的token
+cartesian_candidates_token_id = tree_candidates_last_token_id_ext[retrieve_token_indices]
 即
 [0, 1, 11, 39, 63],  # base_model.cur_token + head[0].token[0]+head[1].token[0] + head[2].token[0] + head[3].token[1]
 [0, 1, 11, 39, 62],  # base_model.cur_token + head[0].token[0]+head[1].token[0] + head[2].token[0] + head[3].token[0]
 [0, 3, 28, 61, -1],  # base_model.cur_token + head[0].token[2]+head[1].token[0] + head[2].token[0]
 ...
 将head简化为h, token简化为t,以下是 cartesian_candidates_token_id, 共42行
-
 
 base_model.cur_token + h[0].t[0]+h[1].t[0] + h[2].t[0] + h[3].t[1]
 base_model.cur_token + h[0].t[0]+h[1].t[0] + h[2].t[0] + h[3].t[0]
@@ -900,7 +911,7 @@ base_model.cur_token + h[0].t[2]+h[1].t[1]
 base_model.cur_token + h[0].t[0]+h[1].t[9]
 base_model.cur_token + h[0].t[0]+h[1].t[8]
 
-上面的序列最终验证的不同的前缀token组合共有52种,如下：
+上面的序列最终验证的不同的前缀token组合共有52种,并不是64种,所有路径如下：
 base_model.cur_token
 base_model.cur_token+h[0].t[0]
 base_model.cur_token+h[0].t[1]

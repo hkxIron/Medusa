@@ -253,17 +253,17 @@ def test_medusa_step():
         #                   格式为： [base_model.cur_token, head[0], head[1], head[2], head[3]] , NOTE:并没有head[4]
         # =>
         # cartesian_candidates_token_id: [path_num=42, head_position_num=base_model.cur_token+head[0~3]=5]
-        # tree_candidates_token_id: [batch=1, seq_len=64]
-        cartesian_candidates_token_id, tree_candidates_token_id = generate_candidates_from_medusa_head(
+        # tree_candidates_last_token_id: [batch=1, seq_len=64]
+        cartesian_candidates_token_id, tree_candidates_last_token_id = generate_candidates_from_medusa_head(
                 medusa_logits,
                 logits,
                 medusa_buffers["tree_indices"],
                 medusa_buffers["retrieve_indices"],
             )
         print('cartesian_candidates_token_id:', cartesian_candidates_token_id)
-        print('tree_candidates_token_id:', tree_candidates_token_id)
+        print('tree_candidates_last_token_id:', tree_candidates_token_id)
         print('cartesian_candidates shape:', cartesian_candidates_token_id.shape)
-        print('Tree candidates shape:', tree_candidates_token_id.shape)
+        print('Tree candidates shape:', tree_candidates_last_token_id.shape)
         print('Most left 2 candidates path:', tokenizer.batch_decode(cartesian_candidates_token_id[0]), tokenizer.batch_decode(cartesian_candidates_token_id[1]))
         print('Another candidate path:', tokenizer.batch_decode(cartesian_candidates_token_id[-1]))
 
@@ -272,7 +272,7 @@ def test_medusa_step():
         The `evaluate_posterior` performs the verification of the tree.
         """
         # 推理
-        # tree_candidates_token_id: [batch=1, seq_len=64]
+        # tree_candidates_last_token_id: [batch=1, seq_len=64]
         # medusa_position_ids: [seq_len=all_path_num=64]
         # retrieve_indices: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
         # input_ids: [batch=1, seq_len=66]
@@ -282,7 +282,7 @@ def test_medusa_step():
         # NOTE: 此处会进行模型的前向传播
         medusa_logits, logits, outputs = tree_decoding(
                     model,
-                    tree_candidates_token_id, # 只会从tree_candidates_token_id取retrieve_indices中部分的值
+                    tree_candidates_last_token_id, # 只会从tree_candidates_token_id取retrieve_indices中部分的值
                     past_key_values,
                     medusa_buffers["medusa_position_ids"],
                     input_ids,
@@ -415,8 +415,8 @@ def test_medusa_all():
             #                   格式为： [base_model.cur_token, head[0], head[1], head[2], head[3]] , NOTE:并没有head[4]
             # =>
             # cartesian_candidates_token_id: [path_num=42, head_position_num=base_model.cur_token+head[0~3]=5]
-            # tree_candidates_token_id: [batch=1, seq_len=64]
-            cartesian_candidates_token_id, tree_candidates_token_id = generate_candidates_from_medusa_head(
+            # tree_candidates_last_token_id: [batch=1, seq_len=64]
+            cartesian_candidates_token_id, tree_candidates_last_token_id = generate_candidates_from_medusa_head(
                     medusa_logits,
                     logits,
                     medusa_buffers["tree_indices"],
@@ -428,7 +428,7 @@ def test_medusa_all():
             The `evaluate_posterior` performs the verification of the tree.
             """
             # 推理
-            # tree_candidates_token_id: [batch=1, seq_len=64]
+            # tree_candidates_last_token_id: [batch=1, seq_len=64]
             # medusa_position_ids: [seq_len=all_path_num=64]
             # retrieve_indices: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
             # input_ids: [batch=1, seq_len=66]
@@ -438,13 +438,13 @@ def test_medusa_all():
             # NOTE: 此处会进行模型的前向传播
             medusa_logits, logits, outputs = tree_decoding(
                     model,
-                    tree_candidates_token_id,
+                    tree_candidates_last_token_id,
                     past_key_values,
                     medusa_buffers["medusa_position_ids"],
                     input_ids,
                     medusa_buffers["retrieve_indices"],
                 )
-            # 验证
+            # 验证,找到最长的接受的路径
             # logits: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5, vocab_size]
             # cartesian_candidates_token_id: [path_num=42, head_position_num=base_model.cur_token+head[0...4]=5]
             # =>
@@ -495,7 +495,7 @@ def test_medusa_all():
 
         print('Decode:', tokenizer.batch_decode(input_ids[:,input_len:]))
         print(f'{accept_lengths_tree=}')
-        print(f'{accept_lengths_tree.shape=}')
+        print(f'{len(accept_lengths_tree)=}')
 
 
 if __name__ == "__main__":
